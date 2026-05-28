@@ -310,19 +310,82 @@ function rowToTemplateValues(row: CaptureAttendanceRow | ZoomAttendanceRow | Sum
 }
 
 function renderEvidence(section: string, rows: EmbeddedEvidenceRow[], form: AttendanceBaseForm): string {
-  const evidenceRows = rows.length ? rows : [
-    { period: 1 as const, mode: "camera" as const, sequence: 1, cameraImage: null, chatImages: [] },
-    { period: 2 as const, mode: "camera" as const, sequence: 1, cameraImage: null, chatImages: [] },
+  const open = "{{#증빙묶음}}";
+  const close = "{{/증빙묶음}}";
+  const start = section.indexOf(open);
+  const end = section.indexOf(close);
+  if (start < 0 || end < 0 || end < start) return section;
+
+  const rowStart = section.lastIndexOf("<hp:tr", start);
+  const closeRowEnd = section.indexOf("</hp:tr>", end);
+  if (rowStart < 0 || closeRowEnd < 0) return section;
+  const blockEnd = closeRowEnd + "</hp:tr>".length;
+
+  // The block holds two template rows: a wide camera row whose first cell is the
+  // 교시 label (vertically merged), and a chat row with four narrow image cells.
+  const templateRows = section.slice(rowStart, blockEnd).match(/<hp:tr\b[\s\S]*?<\/hp:tr>/g) ?? [];
+  const cameraRow = templateRows[0];
+  const chatRow = templateRows[1];
+  if (!cameraRow || !chatRow) return section;
+  const cameraCells = cameraRow.replace(open, "").match(/<hp:tc\b[\s\S]*?<\/hp:tc>/g) ?? [];
+  const chatCells = chatRow.replace(close, "").match(/<hp:tc\b[\s\S]*?<\/hp:tc>/g) ?? [];
+  const labelCell = cameraCells[0];
+  const cameraContentCells = cameraCells.slice(1);
+  if (!labelCell || !cameraContentCells.length || !chatCells.length) return section;
+
+  const rowHeight = readCellHeight(cameraContentCells[0] ?? "") || 7456;
+  const baseRow = Number(cameraRow.match(/rowAddr="(\d+)"/)?.[1] ?? "0");
+
+  const dataRows: EmbeddedEvidenceRow[] = rows.length ? rows : [
+    { period: 1, mode: "camera", sequence: 1, cameraImage: null, chatImages: [] },
+    { period: 2, mode: "camera", sequence: 1, cameraImage: null, chatImages: [] },
   ];
-  return renderBlock(section, "증빙묶음", evidenceRows.map((row) => ({
-    "교시라벨": row.period === 1 ? form.period1Label : form.period2Label,
+  const periods = [...new Set(dataRows.map((row) => row.period))].sort((a, b) => a - b);
+
+  const physicalRows: string[] = [];
+  periods.forEach((period) => {
+    const group = dataRows.filter((row) => row.period === period);
+    const periodLabel = period === 1 ? form.period1Label : form.period2Label;
+    group.forEach((row, index) => {
+      const cells: string[] = [];
+      // The 교시 label cell appears once per period and spans the whole group.
+      if (index === 0) cells.push(renderEvidenceLabelCell(labelCell, periodLabel, group.length, rowHeight));
+      const contentCells = row.mode === "camera" ? cameraContentCells : chatCells;
+      const values = evidenceRowValues(row);
+      contentCells.forEach((cell) => cells.push(replaceTokens(cell, values)));
+      const rowAddr = baseRow + physicalRows.length;
+      physicalRows.push(`<hp:tr>${cells.map((cell) => setCellRowAddr(cell, rowAddr)).join("")}</hp:tr>`);
+    });
+  });
+
+  const rowDelta = physicalRows.length - 2;
+  const rendered = physicalRows.join("");
+  return `${updateLastTableRowCount(section.slice(0, rowStart), rowDelta)}${rendered}${shiftFollowingTableRows(section.slice(blockEnd), rowDelta)}`;
+}
+
+function renderEvidenceLabelCell(template: string, label: string, span: number, rowHeight: number): string {
+  return replaceTokens(template, { "교시라벨": label })
+    .replace(/(<hp:cellSpan colSpan="\d+" rowSpan=)"\d+"/, `$1"${span}"`)
+    .replace(/(<hp:cellSz width="\d+" height=)"\d+"/, `$1"${rowHeight * span}"`);
+}
+
+function evidenceRowValues(row: EmbeddedEvidenceRow): Record<string, string> {
+  return {
     "증빙번호": `${row.period}-${row.sequence}`,
     "캠화면이미지": row.mode === "camera" && row.cameraImage ? renderImageXml(row.cameraImage, "wide") : "",
     "채팅화면_1": row.mode === "chat" && row.chatImages[0] ? renderImageXml(row.chatImages[0], "narrow") : "",
     "채팅화면_2": row.mode === "chat" && row.chatImages[1] ? renderImageXml(row.chatImages[1], "narrow") : "",
     "채팅화면_3": row.mode === "chat" && row.chatImages[2] ? renderImageXml(row.chatImages[2], "narrow") : "",
     "채팅화면_4": row.mode === "chat" && row.chatImages[3] ? renderImageXml(row.chatImages[3], "narrow") : "",
-  })));
+  };
+}
+
+function readCellHeight(cell: string): number {
+  return Number(cell.match(/<hp:cellSz width="\d+" height="(\d+)"/)?.[1] ?? "0");
+}
+
+function setCellRowAddr(cell: string, rowAddr: number): string {
+  return cell.replace(/rowAddr="\d+"/, `rowAddr="${rowAddr}"`);
 }
 
 function renderBlock(section: string, name: string, rows: Record<string, string>[]): string {
@@ -385,9 +448,12 @@ function replaceTokens(value: string, replacements: Record<string, string>): str
 }
 
 function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): EmbeddedEvidenceRow[] {
+  const meaningfulRows = rows.filter((row) =>
+    row.mode === "camera" ? Boolean(row.cameraImage) : row.chatImages.length > 0,
+  );
   let imageIndex = 0;
   const sequenceByPeriod = new Map<1 | 2, number>();
-  const embeddedRows = rows.map((row) => {
+  const embeddedRows = meaningfulRows.map((row) => {
     const nextSequence = (sequenceByPeriod.get(row.period) ?? 0) + 1;
     sequenceByPeriod.set(row.period, nextSequence);
     const embed = (image: CaptureEvidenceImage): EmbeddedImageRef => {
