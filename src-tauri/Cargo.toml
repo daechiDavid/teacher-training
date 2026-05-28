@@ -1,0 +1,23 @@
+[package]
+name = "teacher-training-receipts"
+version = "0.1.0"
+description = "직무연수 이수자 영수증 발급 관리 시스템"
+edition = "2021"
+
+[lib]
+name = "teacher_training_receipts_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.6", features = [] }
+
+[dependencies]
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tauri = { version = "2.2.0", features = [] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+url = "2.5"
+uuid = { version = "1.11", features = ["v4", "serde"] }
