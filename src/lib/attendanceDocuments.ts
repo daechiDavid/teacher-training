@@ -92,7 +92,8 @@ const HWPX_TEMPLATES = {
 type HwpxFiles = Record<string, Uint8Array>;
 
 type EmbeddedImageRef = {
-  id: string;
+  refId: string;
+  picId: number;
   name: string;
   path: string;
 };
@@ -392,10 +393,12 @@ function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Embe
     const embed = (image: CaptureEvidenceImage): EmbeddedImageRef => {
       imageIndex += 1;
       const extension = imageExtension(image.dataUrl, image.name);
-      const path = `BinData/attendance_image_${imageIndex}.${extension}`;
+      const refId = `image${imageIndex}`;
+      const path = `BinData/${refId}.${extension}`;
       files[path] = dataUrlToBytes(image.dataUrl);
       return {
-        id: `attendanceImage${imageIndex}`,
+        refId,
+        picId: 1000 + imageIndex,
         name: image.name,
         path,
       };
@@ -415,19 +418,19 @@ function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Embe
   const headerPath = "Contents/header.xml";
   let header = decodeUtf8(files[headerPath]);
   const binDataList = `<hh:binDataList itemCnt="${refs.length}">${refs
-    .map((ref) => `<hh:binData id="${ref.id}" type="EMBEDDING" embedding="${ref.path}" compression="0"/>`)
+    .map((ref) => `<hh:binData id="${ref.refId}" type="EMBEDDING" embedding="${ref.path}" compression="0"/>`)
     .join("")}</hh:binDataList>`;
   if (header.includes("<hh:binDataList")) {
     header = header.replace(/<hh:binDataList[\s\S]*?<\/hh:binDataList>/, binDataList);
   } else {
-    header = header.replace("<hh:refList>", `<hh:refList>${binDataList}`);
+    header = header.replace("</hh:refList>", `${binDataList}</hh:refList>`);
   }
   files[headerPath] = encodeUtf8(header);
 
   const contentPath = "Contents/content.hpf";
   if (files[contentPath]) {
     let content = decodeUtf8(files[contentPath]);
-    const items = refs.map((ref) => `<opf:item id="${ref.id}" href="${ref.path}" media-type="${imageMime(ref.path)}" isEmbeded="1"/>`).join("");
+    const items = refs.map((ref) => `<opf:item id="${ref.refId}" href="${ref.path}" media-type="${imageMime(ref.path)}" isEmbeded="1"/>`).join("");
     content = content.replace("</opf:manifest>", `${items}</opf:manifest>`);
     files[contentPath] = encodeUtf8(content);
   }
@@ -436,9 +439,36 @@ function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Embe
 
 function renderImageXml(image: EmbeddedImageRef, size: "wide" | "narrow"): string {
   const width = size === "wide" ? 30000 : 7600;
-  const height = size === "wide" ? 6500 : 6500;
-  const numericId = 1000 + Number(image.id.replace(/\D/g, "") || 0);
-  return `<hp:pic id="${numericId}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None"><hp:orgSz width="${width}" height="${height}"/><hp:curSz width="${width}" height="${height}"/><hp:sz width="${width}" height="${height}" widthRelTo="ABSOLUTE" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgRect><hp:pt0 x="0" y="0"/><hp:pt1 x="${width}" y="0"/><hp:pt2 x="${width}" y="${height}"/><hp:pt3 x="0" y="${height}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:effects/><hc:img binaryItemIDRef="${image.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hp:pic><hp:t/>`;
+  const height = 6500;
+  const identityMatrix = `e1="1.000000" e2="0.000000" e3="0.000000" e4="0.000000" e5="1.000000" e6="0.000000"`;
+  return (
+    `<hp:pic id="${image.picId}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None">` +
+    `<hp:offset x="0" y="0"/>` +
+    `<hp:orgSz width="${width}" height="${height}"/>` +
+    `<hp:curSz width="${width}" height="${height}"/>` +
+    `<hp:flip horizontal="0" vertical="0"/>` +
+    `<hp:rotationInfo angle="0" centerX="0" centerY="0" rotateImage="1"/>` +
+    `<hp:renderingInfo>` +
+      `<hc:transMatrix ${identityMatrix}/>` +
+      `<hc:scaMatrix ${identityMatrix}/>` +
+      `<hc:rotMatrix ${identityMatrix}/>` +
+    `</hp:renderingInfo>` +
+    `<hp:sz width="${width}" height="${height}" widthRelTo="ABSOLUTE" heightRelTo="ABSOLUTE" protect="0"/>` +
+    `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
+    `<hp:outMargin left="0" right="0" top="0" bottom="0"/>` +
+    `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
+    `<hp:imgDim dimwidth="${width}" dimheight="${height}"/>` +
+    `<hp:imgRect>` +
+      `<hc:pt0 x="0" y="0"/>` +
+      `<hc:pt1 x="${width}" y="0"/>` +
+      `<hc:pt2 x="${width}" y="${height}"/>` +
+      `<hc:pt3 x="0" y="${height}"/>` +
+    `</hp:imgRect>` +
+    `<hp:imgClip left="0" right="0" top="0" bottom="0"/>` +
+    `<hp:effects/>` +
+    `<hc:img binaryItemIDRef="${image.refId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>` +
+    `</hp:pic><hp:t/>`
+  );
 }
 
 function updatePreviewText(files: HwpxFiles, section: string) {
