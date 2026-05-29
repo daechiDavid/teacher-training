@@ -63,6 +63,7 @@ import {
   resolveGoogleSheetTitle,
   saveGoogleConfig,
   startGoogleOAuth,
+  googleLogout,
   uploadPdfToDrive,
 } from "../lib/google";
 import { generateReceiptPdf, todayLocalDate } from "../lib/receipt";
@@ -268,6 +269,22 @@ export function App() {
       setNotice("Google 로그인이 완료되었습니다.");
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : String(authError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectGoogle() {
+    setError(null);
+    setBusy(true);
+    try {
+      await googleLogout();
+      await refreshGoogleStatus();
+      setStep("settings");
+      setActiveTask(null);
+      setNotice("Google 로그아웃 되었습니다. 다른 계정으로 다시 로그인하세요.");
+    } catch (logoutError) {
+      setError(logoutError instanceof Error ? logoutError.message : String(logoutError));
     } finally {
       setBusy(false);
     }
@@ -831,7 +848,7 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <Header authenticated={isAuthenticated} />
+      <Header authenticated={isAuthenticated} onLogout={disconnectGoogle} />
 
       {error ? (
         <section className="alert error">
@@ -992,7 +1009,7 @@ export function App() {
   );
 }
 
-function Header({ authenticated }: { authenticated: boolean }) {
+function Header({ authenticated, onLogout }: { authenticated: boolean; onLogout: () => void }) {
   return (
     <header className="topbar">
       <div className="brand">
@@ -1005,6 +1022,9 @@ function Header({ authenticated }: { authenticated: boolean }) {
       <div className="security-chip">
         <LockKeyhole size={16} />
         {authenticated ? "Google connected" : "Google login required"}
+        {authenticated ? (
+          <button className="logout-button" type="button" onClick={onLogout} title="Google 로그아웃">로그아웃</button>
+        ) : null}
       </div>
     </header>
   );

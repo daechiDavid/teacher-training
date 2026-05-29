@@ -62,6 +62,10 @@ export async function startGoogleOAuth(): Promise<void> {
   await invoke("start_google_oauth");
 }
 
+export async function googleLogout(): Promise<void> {
+  await invoke("google_logout");
+}
+
 export async function readGoogleRosterValues(): Promise<unknown[][]> {
   return invoke("google_read_roster_values");
 }

@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg"],
+    "targets": "all",
     "resources": [
       "google-oauth.example.json"
     ],

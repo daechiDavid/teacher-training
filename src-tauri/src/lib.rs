@@ -217,6 +217,15 @@ fn save_google_config(app: AppHandle, request: SaveGoogleConfigRequest) -> Resul
 }
 
 #[tauri::command]
+fn google_logout(app: AppHandle) -> Result<(), String> {
+    let path = google_token_path(&app)?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn google_config_status(app: AppHandle) -> Result<GoogleConfigStatus, String> {
     let config = read_google_config(&app).unwrap_or_default();
     let oauth = resolve_google_oauth_config(&app).unwrap_or_default();
@@ -282,7 +291,7 @@ fn google_read_roster_values(app: AppHandle) -> Result<Vec<Vec<String>>, String>
 
 #[tauri::command]
 fn google_read_sheet_values(app: AppHandle, request: ReadSheetValuesRequest) -> Result<Vec<Vec<String>>, String> {
-    let config = resolve_google_config(&app)?;
+    let config = resolve_google_oauth_config(&app)?;
     let token = valid_access_token(&app, &config)?;
     let spreadsheet_id = request.spreadsheet_id.trim();
     if spreadsheet_id.is_empty() {
@@ -499,6 +508,7 @@ pub fn run() {
             app_status,
             append_job_log,
             save_google_config,
+            google_logout,
             google_config_status,
             start_google_oauth,
             google_read_roster_values,
@@ -651,8 +661,9 @@ fn first_non_empty(values: &[&str]) -> String {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<T, String> {
-    let content = fs::read_to_string(path).map_err(|_| "Google 설정 또는 인증 정보가 없습니다.".to_string())?;
-    serde_json::from_str(&content).map_err(|error| error.to_string())
+    let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let content = fs::read_to_string(path).map_err(|_| format!("파일을 찾을 수 없습니다: {filename} (경로: {})", path.display()))?;
+    serde_json::from_str(&content).map_err(|error| format!("{filename} 파싱 실패: {error}"))
 }
 
 fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), String> {
@@ -720,8 +731,8 @@ fn open_url(url: &str) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", url]);
+        let mut command = Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
         command
     };
 
