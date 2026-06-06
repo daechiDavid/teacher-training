@@ -17,7 +17,7 @@ export type ParsedSheet<T> = {
 export async function readWorkbookRows(file: File): Promise<unknown[][]> {
   const rows = await readSheet(file);
   if (!rows.length) {
-    throw new Error("엑셀 파일에 시트가 없습니다.");
+    throw new Error("엑셀 파일에서 읽을 수 있는 내용이 없습니다.");
   }
   return rows.map((row: unknown[]) => row.map((value: unknown) => cellToString(value)));
 }

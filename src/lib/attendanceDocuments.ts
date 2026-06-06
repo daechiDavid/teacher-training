@@ -65,6 +65,15 @@ export type SummaryAttendanceRow = AttendancePerson & {
   result3: "이수" | "미이수";
 };
 
+export type ZoomChatAttendanceApplyResult = {
+  rows: CaptureAttendanceRow[];
+  startMatches: number;
+  endMatches: number;
+  anchorTime: string;
+  startWindowLabel: string;
+  endWindowLabel: string;
+};
+
 export type EvaluationSummary = {
   respondentCount: number;
   averages: string[];
@@ -96,6 +105,8 @@ type EmbeddedImageRef = {
   picId: number;
   name: string;
   path: string;
+  naturalWidth: number;
+  naturalHeight: number;
 };
 
 type EmbeddedEvidenceRow = {
@@ -121,9 +132,9 @@ export function buildAttendancePeople(rows: NormalizedCompletion[]): AttendanceP
 export function buildDefaultCaptureRows(people: AttendancePerson[]): CaptureAttendanceRow[] {
   return people.map((person) => ({
     ...person,
-    period1: "O",
-    period2: "O",
-    result: "인정",
+    period1: "X",
+    period2: "X",
+    result: "미인정",
   }));
 }
 
@@ -134,8 +145,63 @@ export function updateCaptureResult(row: CaptureAttendanceRow): CaptureAttendanc
   };
 }
 
+export async function applyZoomChatAttendanceText(
+  file: File,
+  rows: CaptureAttendanceRow[],
+  form: AttendanceBaseForm,
+): Promise<ZoomChatAttendanceApplyResult> {
+  const text = await readFileAsText(file);
+  const records = parseZoomChatRecords(text);
+  const anchor = findZoomChatClockAnchor(records);
+  if (!anchor) {
+    throw new Error("보조강사가 실제 시각(HH:mm)을 입력한 채팅을 찾지 못했습니다.");
+  }
+  const start = parseMinutes(form.startTime);
+  const end = parseMinutes(form.endTime);
+  if (start == null || end == null) {
+    throw new Error("연수 시작시간과 종료시간을 HH:mm 형식으로 입력하세요.");
+  }
+  if (!records.length) {
+    throw new Error("줌 채팅기록에서 읽을 수 있는 대화 내용을 찾지 못했습니다.");
+  }
+  const normalizedEnd = end < start ? end + 1440 : end;
+  const meetingStart = normalizeMinuteNearRange(anchor.clockMinutes - anchor.elapsedMinutes, start, normalizedEnd);
+  const recordTimes = records.map((record) => normalizeMinuteNearRange(anchor.clockMinutes + (record.elapsedMinutes - anchor.elapsedMinutes), start, normalizedEnd));
+  const meetingEnd = Math.max(...recordTimes);
+  const startWindowEnd = start + 30;
+  const endWindowStart = meetingEnd - 30;
+  const startNames = new Set<string>();
+  const endNames = new Set<string>();
+
+  records.forEach((record, index) => {
+    if (!record.message.includes("출석")) return;
+    const actual = recordTimes[index];
+    if (actual >= start && actual <= startWindowEnd) startNames.add(record.speaker);
+    if (actual >= endWindowStart && actual <= meetingEnd) endNames.add(record.speaker);
+  });
+
+  let startMatches = 0;
+  let endMatches = 0;
+  const nextRows = rows.map((row) => {
+    const period1 = [...startNames].some((speaker) => isZoomNameMatch(speaker, row.name)) ? "O" : row.period1;
+    const period2 = [...endNames].some((speaker) => isZoomNameMatch(speaker, row.name)) ? "O" : row.period2;
+    if (period1 === "O" && row.period1 !== "O") startMatches += 1;
+    if (period2 === "O" && row.period2 !== "O") endMatches += 1;
+    return updateCaptureResult({ ...row, period1, period2 });
+  });
+
+  return {
+    rows: nextRows,
+    startMatches,
+    endMatches,
+    anchorTime: formatMinutes(anchor.clockMinutes),
+    startWindowLabel: `${formatMinutes(start)}~${formatMinutes(startWindowEnd)}`,
+    endWindowLabel: `${formatMinutes(endWindowStart)}~${formatMinutes(meetingEnd)}`,
+  };
+}
+
 export async function parseZoomAttendanceWorkbook(file: File, people: AttendancePerson[], form: AttendanceBaseForm): Promise<ZoomAttendanceRow[]> {
-  const rawRows = await readSheet(file);
+  const rawRows = await readZoomRows(file);
   const records = rawRows.slice(1).map((row) => ({
     zoomName: normalizeText(row[16]),
     entry: normalizeTime(row[18]),
@@ -168,6 +234,148 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
       warning: !matches.length ? "줌 접속기록 없음" : rawMinutes < 80 ? "U열 기간 합계 80분 미만 확인 필요" : undefined,
     };
   });
+}
+
+async function readZoomRows(file: File): Promise<unknown[][]> {
+  const isCsv = /\.csv$/i.test(file.name) || file.type === "text/csv";
+  if (isCsv) {
+    return parseCsv(await readFileAsText(file));
+  }
+  return readSheet(file);
+}
+
+async function readFileAsText(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  // Zoom CSV exports may be UTF-8 with a BOM; strip it so the first cell parses cleanly.
+  const text = new TextDecoder("utf-8").decode(buffer);
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = true;
+    } else if (char === ",") {
+      row.push(field);
+      field = "";
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\r" && text[i + 1] === "\n") i += 1;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += char;
+    }
+  }
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+type ZoomChatRecord = {
+  elapsedMinutes: number;
+  speaker: string;
+  message: string;
+};
+
+function parseZoomChatRecords(text: string): ZoomChatRecord[] {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const records: ZoomChatRecord[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const inlineRecord = parseInlineZoomChatRecord(lines[index]);
+    if (inlineRecord) {
+      records.push(inlineRecord);
+      continue;
+    }
+    const elapsedMinutes = parseElapsedMinutes(lines[index]);
+    if (elapsedMinutes == null) continue;
+    const speakerLine = normalizeText(lines[index + 1] ?? "");
+    const speaker = parseZoomChatSpeaker(speakerLine);
+    if (!speaker) continue;
+    const messageLines: string[] = [];
+    index += 2;
+    while (index < lines.length && parseElapsedMinutes(lines[index]) == null) {
+      messageLines.push(lines[index]);
+      index += 1;
+    }
+    index -= 1;
+    records.push({
+      elapsedMinutes,
+      speaker,
+      message: normalizeText(messageLines.join("\n")),
+    });
+  }
+  return records;
+}
+
+function parseInlineZoomChatRecord(value: string): ZoomChatRecord | null {
+  const columns = value.split("\t").map(normalizeText);
+  if (columns.length >= 3) {
+    const elapsedMinutes = parseElapsedMinutes(columns[0]);
+    const speaker = columns[1].replace(/:$/, "").trim();
+    const message = columns.slice(2).join("\t").trim();
+    if (elapsedMinutes != null && speaker) {
+      return { elapsedMinutes, speaker, message };
+    }
+  }
+
+  const match = normalizeText(value).match(/^(\d{1,2}):(\d{2}):(\d{2})\s+(.+?):\s*(.*)$/);
+  if (!match) return null;
+  return {
+    elapsedMinutes: Number(match[1]) * 60 + Number(match[2]) + Number(match[3]) / 60,
+    speaker: match[4].trim(),
+    message: match[5].trim(),
+  };
+}
+
+function parseZoomChatSpeaker(value: string): string {
+  const clean = normalizeText(value);
+  if (!clean) return "";
+  if (clean.endsWith(":")) return clean.slice(0, -1).trim();
+  const fromMatch = clean.match(/^(?:From|발신자)\s+(.+?)\s+(?:to|에게|님께서|→)/i);
+  if (fromMatch?.[1]) return fromMatch[1].trim();
+  return "";
+}
+
+function findZoomChatClockAnchor(records: ZoomChatRecord[]): { elapsedMinutes: number; clockMinutes: number } | null {
+  for (const record of records) {
+    const combined = `${record.speaker}\n${record.message}`;
+    if (!combined.includes("보조강사")) continue;
+    const match = combined.match(/(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?:[^\d]|$)/);
+    if (!match) continue;
+    return {
+      elapsedMinutes: record.elapsedMinutes,
+      clockMinutes: Number(match[1]) * 60 + Number(match[2]),
+    };
+  }
+  return null;
+}
+
+function parseElapsedMinutes(value: string): number | null {
+  const match = normalizeText(value).match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\s|$)/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]) + Number(match[3]) / 60;
 }
 
 export function buildSummaryRows(captureRows: CaptureAttendanceRow[], zoomRows: ZoomAttendanceRow[]): SummaryAttendanceRow[] {
@@ -277,9 +485,9 @@ async function createHwpx(
   evidenceRows: CaptureEvidenceRow[] = [],
 ): Promise<Blob> {
   const response = await fetch(HWPX_TEMPLATES[template]);
-  if (!response.ok) throw new Error(`HWPX 템플릿을 불러오지 못했습니다. HTTP ${response.status}`);
+  if (!response.ok) throw new Error("한글 문서 양식을 불러오지 못했습니다. 다시 시도해 주세요.");
   const files = await unzipArchive(new Uint8Array(await response.arrayBuffer()));
-  const embeddedEvidenceRows = template === "capture" ? embedEvidenceImages(files, evidenceRows) : [];
+  const embeddedEvidenceRows = template === "capture" ? await embedEvidenceImages(files, evidenceRows) : [];
   let section = decodeUtf8(files["Contents/section0.xml"]);
   section = renderBlock(section, "연수생", rows.map(rowToTemplateValues));
   section = renderEvidence(section, embeddedEvidenceRows, form);
@@ -333,7 +541,7 @@ function renderEvidence(section: string, rows: EmbeddedEvidenceRow[], form: Atte
   const cameraContentCells = cameraCells.slice(1);
   if (!labelCell || !cameraContentCells.length || !chatCells.length) return section;
 
-  const rowHeight = readCellHeight(cameraContentCells[0] ?? "") || 7456;
+  const defaultRowHeight = readCellHeight(cameraContentCells[0] ?? "") || 7456;
   const baseRow = Number(cameraRow.match(/rowAddr="(\d+)"/)?.[1] ?? "0");
 
   const dataRows: EmbeddedEvidenceRow[] = rows.length ? rows : [
@@ -346,13 +554,15 @@ function renderEvidence(section: string, rows: EmbeddedEvidenceRow[], form: Atte
   periods.forEach((period) => {
     const group = dataRows.filter((row) => row.period === period);
     const periodLabel = period === 1 ? form.period1Label : form.period2Label;
+    const rowHeights = group.map((row) => computeEvidenceRowHeight(row, defaultRowHeight));
     group.forEach((row, index) => {
+      const rowHeight = rowHeights[index];
       const cells: string[] = [];
       // The 교시 label cell appears once per period and spans the whole group.
-      if (index === 0) cells.push(renderEvidenceLabelCell(labelCell, periodLabel, group.length, rowHeight));
+      if (index === 0) cells.push(renderEvidenceLabelCell(labelCell, periodLabel, group.length, rowHeights));
       const contentCells = row.mode === "camera" ? cameraContentCells : chatCells;
       const values = evidenceRowValues(row);
-      contentCells.forEach((cell) => cells.push(replaceTokens(cell, values)));
+      contentCells.forEach((cell) => cells.push(setCellHeight(replaceTokens(cell, values), rowHeight)));
       const rowAddr = baseRow + physicalRows.length;
       physicalRows.push(`<hp:tr>${cells.map((cell) => setCellRowAddr(cell, rowAddr)).join("")}</hp:tr>`);
     });
@@ -363,10 +573,11 @@ function renderEvidence(section: string, rows: EmbeddedEvidenceRow[], form: Atte
   return `${updateLastTableRowCount(section.slice(0, rowStart), rowDelta)}${rendered}${shiftFollowingTableRows(section.slice(blockEnd), rowDelta)}`;
 }
 
-function renderEvidenceLabelCell(template: string, label: string, span: number, rowHeight: number): string {
+function renderEvidenceLabelCell(template: string, label: string, span: number, rowHeights: number[]): string {
+  const totalHeight = rowHeights.reduce((sum, h) => sum + h, 0);
   return replaceTokens(template, { "교시라벨": label })
     .replace(/(<hp:cellSpan colSpan="\d+" rowSpan=)"\d+"/, `$1"${span}"`)
-    .replace(/(<hp:cellSz width="\d+" height=)"\d+"/, `$1"${rowHeight * span}"`);
+    .replace(/(<hp:cellSz width="\d+" height=)"\d+"/, `$1"${totalHeight}"`);
 }
 
 function evidenceRowValues(row: EmbeddedEvidenceRow): Record<string, string> {
@@ -384,6 +595,27 @@ function readCellHeight(cell: string): number {
   return Number(cell.match(/<hp:cellSz width="\d+" height="(\d+)"/)?.[1] ?? "0");
 }
 
+function setCellHeight(cell: string, height: number): string {
+  return cell.replace(/(<hp:cellSz width="\d+" height=)"\d+"/, `$1"${height}"`);
+}
+
+function computeEvidenceRowHeight(row: EmbeddedEvidenceRow, defaultHeight: number): number {
+  const WIDE_WIDTH = 30000;
+  const NARROW_WIDTH = 7600;
+  const PADDING = 800;
+  if (row.mode === "camera" && row.cameraImage && row.cameraImage.naturalWidth > 0) {
+    const imgHeight = Math.round(WIDE_WIDTH * (row.cameraImage.naturalHeight / row.cameraImage.naturalWidth));
+    return Math.max(defaultHeight, imgHeight + PADDING);
+  }
+  if (row.mode === "chat" && row.chatImages.length > 0) {
+    const maxImgHeight = Math.max(...row.chatImages
+      .filter((img) => img.naturalWidth > 0)
+      .map((img) => Math.round(NARROW_WIDTH * (img.naturalHeight / img.naturalWidth))));
+    if (maxImgHeight > 0) return Math.max(defaultHeight, maxImgHeight + PADDING);
+  }
+  return defaultHeight;
+}
+
 function setCellRowAddr(cell: string, rowAddr: number): string {
   return cell.replace(/rowAddr="\d+"/, `rowAddr="${rowAddr}"`);
 }
@@ -399,19 +631,36 @@ function renderBlock(section: string, name: string, rows: Record<string, string>
   const rowEnd = section.indexOf("</hp:tr>", end);
   if (rowStart >= 0 && rowEnd >= 0) {
     const blockEnd = rowEnd + "</hp:tr>".length;
-    const block = section.slice(rowStart, blockEnd);
+    const block = removeParagraphsContaining(section.slice(rowStart, blockEnd), [open, close]);
     const rowCount = countOccurrences(block, "<hp:tr");
     const rowDelta = Math.max(0, rows.length - 1) * rowCount;
     const rendered = rows.map((row, index) =>
-      shiftTableRowAddresses(replaceTokens(block, row).replace(open, "").replace(close, ""), index * rowCount),
+      shiftTableRowAddresses(replaceTokens(block, row), index * rowCount),
     ).join("");
     return `${updateLastTableRowCount(section.slice(0, rowStart), rowDelta)}${rendered}${shiftFollowingTableRows(section.slice(blockEnd), rowDelta)}`;
   }
 
   const blockEnd = end + close.length;
-  const block = section.slice(start, blockEnd);
-  const rendered = rows.map((row) => replaceTokens(block, row).replace(open, "").replace(close, "")).join("");
+  const block = removeParagraphsContaining(section.slice(start, blockEnd), [open, close]);
+  const rendered = rows.map((row) => replaceTokens(block, row)).join("");
   return `${section.slice(0, start)}${rendered}${section.slice(blockEnd)}`;
+}
+
+function removeParagraphsContaining(value: string, markers: string[]): string {
+  return markers.reduce((current, marker) => {
+    let next = current;
+    while (next.includes(marker)) {
+      const markerIndex = next.indexOf(marker);
+      const paragraphStart = next.lastIndexOf("<hp:p", markerIndex);
+      const paragraphEnd = next.indexOf("</hp:p>", markerIndex);
+      if (paragraphStart < 0 || paragraphEnd < 0) {
+        next = next.replace(marker, "");
+      } else {
+        next = `${next.slice(0, paragraphStart)}${next.slice(paragraphEnd + "</hp:p>".length)}`;
+      }
+    }
+    return next;
+  }, value);
 }
 
 function countOccurrences(value: string, pattern: string): number {
@@ -447,36 +696,42 @@ function replaceTokens(value: string, replacements: Record<string, string>): str
   }).replace(/\{\{([^}]+)\}\}/g, (_, key: string) => escapeXml(replacements[key.trim()] ?? ""));
 }
 
-function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): EmbeddedEvidenceRow[] {
+async function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Promise<EmbeddedEvidenceRow[]> {
   const meaningfulRows = rows.filter((row) =>
     row.mode === "camera" ? Boolean(row.cameraImage) : row.chatImages.length > 0,
   );
   let imageIndex = 0;
   const sequenceByPeriod = new Map<1 | 2, number>();
-  const embeddedRows = meaningfulRows.map((row) => {
+  const embeddedRows: EmbeddedEvidenceRow[] = [];
+  for (const row of meaningfulRows) {
     const nextSequence = (sequenceByPeriod.get(row.period) ?? 0) + 1;
     sequenceByPeriod.set(row.period, nextSequence);
-    const embed = (image: CaptureEvidenceImage): EmbeddedImageRef => {
+    const embed = async (image: CaptureEvidenceImage): Promise<EmbeddedImageRef> => {
       imageIndex += 1;
       const extension = imageExtension(image.dataUrl, image.name);
       const refId = `image${imageIndex}`;
       const path = `BinData/${refId}.${extension}`;
       files[path] = dataUrlToBytes(image.dataUrl);
+      const { width: naturalWidth, height: naturalHeight } = await getImageDimensions(image.dataUrl);
       return {
         refId,
         picId: 1000 + imageIndex,
         name: image.name,
         path,
+        naturalWidth,
+        naturalHeight,
       };
     };
-    return {
+    const cameraImage = row.mode === "camera" && row.cameraImage ? await embed(row.cameraImage) : null;
+    const chatImages = row.mode === "chat" ? await Promise.all(row.chatImages.slice(0, 4).map(embed)) : [];
+    embeddedRows.push({
       period: row.period,
       mode: row.mode,
       sequence: nextSequence,
-      cameraImage: row.mode === "camera" && row.cameraImage ? embed(row.cameraImage) : null,
-      chatImages: row.mode === "chat" ? row.chatImages.slice(0, 4).map(embed) : [],
-    };
-  });
+      cameraImage,
+      chatImages,
+    });
+  }
 
   const refs = embeddedRows.flatMap((row) => [row.cameraImage, ...row.chatImages].filter((image): image is EmbeddedImageRef => Boolean(image)));
   if (!refs.length) return embeddedRows;
@@ -505,7 +760,9 @@ function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Embe
 
 function renderImageXml(image: EmbeddedImageRef, size: "wide" | "narrow"): string {
   const width = size === "wide" ? 30000 : 7600;
-  const height = 6500;
+  const height = image.naturalWidth > 0 && image.naturalHeight > 0
+    ? Math.round(width * (image.naturalHeight / image.naturalWidth))
+    : 6500;
   const identityMatrix = `e1="1.000000" e2="0.000000" e3="0.000000" e4="0.000000" e5="1.000000" e6="0.000000"`;
   return (
     `<hp:pic id="${image.picId}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None">` +
@@ -588,7 +845,14 @@ function normalizeTime(value: unknown): string {
   const text = normalizeText(value);
   const match = text.match(/(\d{1,2}):(\d{2})/);
   if (!match) return "";
-  return `${match[1].padStart(2, "0")}:${match[2]}`;
+  let hour = Number(match[1]);
+  const minute = match[2];
+  // Zoom exports record times on a 12-hour clock (e.g. "8:00 PM"); convert to 24-hour
+  // so downstream minute math uses a single consistent scale. Also handles 오전/오후.
+  const meridiem = text.match(/(a\.?m\.?|p\.?m\.?)/i)?.[1]?.toLowerCase() ?? (text.includes("오후") ? "pm" : text.includes("오전") ? "am" : "");
+  if (meridiem.startsWith("p") && hour < 12) hour += 12;
+  if (meridiem.startsWith("a") && hour === 12) hour = 0;
+  return `${String(hour).padStart(2, "0")}:${minute}`;
 }
 
 function parseMinutes(value: string): number | null {
@@ -600,6 +864,13 @@ function parseMinutes(value: string): number | null {
 function formatMinutes(value: number): string {
   const normalized = ((value % 1440) + 1440) % 1440;
   return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(normalized % 60).padStart(2, "0")}`;
+}
+
+function normalizeMinuteNearRange(value: number, start: number, end: number): number {
+  let normalized = value;
+  while (normalized < start - 720) normalized += 1440;
+  while (normalized > end + 720) normalized -= 1440;
+  return normalized;
 }
 
 function addMinutesText(value: string, amount: number): string {
@@ -617,6 +888,15 @@ function escapeXml(value: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => resolve({ width: 0, height: 0 });
+    img.src = dataUrl;
+  });
 }
 
 function dataUrlToBytes(dataUrl: string): Uint8Array {
@@ -675,7 +955,7 @@ function encodeUtf8(value: string): Uint8Array {
 }
 
 function decodeUtf8(value: Uint8Array | undefined): string {
-  if (!value) throw new Error("HWPX 템플릿 본문을 찾지 못했습니다.");
+  if (!value) throw new Error("한글 문서 양식을 읽지 못했습니다. 다시 시도해 주세요.");
   return new TextDecoder().decode(value);
 }
 

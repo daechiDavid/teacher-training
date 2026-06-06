@@ -116,7 +116,7 @@ function buildSchoolName(region: string, school: string): string {
 export async function createCompletionDocumentWorkbook(rows: CompletionDocumentRow[]): Promise<Blob> {
   const templateResponse = await fetch("/completion_template.xlsx");
   if (!templateResponse.ok) {
-    throw new Error(`이수자 명단 엑셀 템플릿을 불러오지 못했습니다. HTTP ${templateResponse.status}`);
+    throw new Error("이수자 명단 양식을 불러오지 못했습니다. 다시 시도해 주세요.");
   }
   const files = await unzipWorkbook(new Uint8Array(await templateResponse.arrayBuffer()));
   const sheetXml = decodeUtf8(files["xl/worksheets/sheet1.xml"]);
@@ -130,7 +130,7 @@ function fillTemplateSheet(sheetXml: string, rows: CompletionDocumentRow[]): str
   const parser = new DOMParser();
   const doc = parser.parseFromString(sheetXml, "application/xml");
   const sheetData = doc.getElementsByTagNameNS(SPREADSHEET_NS, "sheetData")[0];
-  if (!sheetData) throw new Error("템플릿 시트 구조를 읽지 못했습니다.");
+  if (!sheetData) throw new Error("이수자 명단 양식을 읽지 못했습니다. 다시 시도해 주세요.");
 
   const dataRowsNeeded = Math.max(rows.length, 0);
   const existingRows = Array.from(sheetData.getElementsByTagNameNS(SPREADSHEET_NS, "row"));
@@ -258,7 +258,7 @@ async function unzipWorkbook(bytes: Uint8Array): Promise<Record<string, Uint8Arr
     } else if (method === 8) {
       files[name] = await inflateRaw(compressed);
     } else {
-      throw new Error(`지원하지 않는 xlsx 압축 방식입니다: ${method}`);
+      throw new Error("이수자 명단 파일을 만들지 못했습니다. 다른 환경에서 다시 시도해 주세요.");
     }
     offset = dataEnd;
   }
@@ -268,7 +268,7 @@ async function unzipWorkbook(bytes: Uint8Array): Promise<Record<string, Uint8Arr
 
 async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
   if (typeof DecompressionStream === "undefined") {
-    throw new Error("현재 환경에서 템플릿 xlsx 압축 해제를 지원하지 않습니다.");
+    throw new Error("현재 환경에서 이수자 명단 파일 생성을 지원하지 않습니다.");
   }
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
@@ -279,7 +279,7 @@ function encodeUtf8(value: string): Uint8Array {
 }
 
 function decodeUtf8(value: Uint8Array | undefined): string {
-  if (!value) throw new Error("템플릿 xlsx에 필요한 시트 파일이 없습니다.");
+  if (!value) throw new Error("이수자 명단 양식에 필요한 파일이 없습니다.");
   return new TextDecoder().decode(value);
 }
 

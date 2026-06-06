@@ -4,8 +4,7 @@ use reqwest::header::AUTHORIZATION;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
@@ -186,16 +185,25 @@ fn save_google_config(app: AppHandle, request: SaveGoogleConfigRequest) -> Resul
     let resolved_client_id = first_non_empty(&[
         request.client_id.trim(),
         existing.client_id.as_str(),
-        preconfigured.as_ref().map(|value| value.client_id.as_str()).unwrap_or(""),
+        preconfigured
+            .as_ref()
+            .map(|value| value.client_id.as_str())
+            .unwrap_or(""),
     ]);
     let resolved_client_secret = first_non_empty(&[
         request.client_secret.trim(),
         existing.client_secret.as_str(),
-        preconfigured.as_ref().map(|value| value.client_secret.as_str()).unwrap_or(""),
+        preconfigured
+            .as_ref()
+            .map(|value| value.client_secret.as_str())
+            .unwrap_or(""),
     ]);
     let config = GoogleConfig {
         client_id: first_non_empty(&[request.client_id.trim(), existing.client_id.as_str()]),
-        client_secret: first_non_empty(&[request.client_secret.trim(), existing.client_secret.as_str()]),
+        client_secret: first_non_empty(&[
+            request.client_secret.trim(),
+            existing.client_secret.as_str(),
+        ]),
         spreadsheet_id: request.spreadsheet_id.trim().to_string(),
         sheet_name: if request.sheet_name.trim().is_empty() {
             "명단".to_string()
@@ -210,7 +218,9 @@ fn save_google_config(app: AppHandle, request: SaveGoogleConfigRequest) -> Resul
         || config.spreadsheet_id.is_empty()
         || config.drive_parent_folder_id.is_empty()
     {
-        return Err("관리자 OAuth 사전 설정, Spreadsheet ID, Drive 상위 폴더 ID는 필수입니다.".to_string());
+        return Err(
+            "관리자 OAuth 사전 설정, Spreadsheet ID, Drive 상위 폴더 ID는 필수입니다.".to_string(),
+        );
     }
 
     write_json_secure(&google_config_path(&app)?, &config)
@@ -251,7 +261,10 @@ fn google_config_status(app: AppHandle) -> Result<GoogleConfigStatus, String> {
 fn start_google_oauth(app: AppHandle) -> Result<(), String> {
     let config = resolve_google_oauth_config(&app)?;
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-    let port = listener.local_addr().map_err(|error| error.to_string())?.port();
+    let port = listener
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/oauth2/callback");
     let state = Uuid::new_v4().to_string();
     let code_verifier = format!(
@@ -264,7 +277,8 @@ fn start_google_oauth(app: AppHandle) -> Result<(), String> {
     let code_challenge = pkce_challenge(&code_verifier);
 
     let mut auth_url = Url::parse(GOOGLE_AUTH_URL).map_err(|error| error.to_string())?;
-    auth_url.query_pairs_mut()
+    auth_url
+        .query_pairs_mut()
         .append_pair("client_id", &config.client_id)
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
@@ -290,7 +304,10 @@ fn google_read_roster_values(app: AppHandle) -> Result<Vec<Vec<String>>, String>
 }
 
 #[tauri::command]
-fn google_read_sheet_values(app: AppHandle, request: ReadSheetValuesRequest) -> Result<Vec<Vec<String>>, String> {
+fn google_read_sheet_values(
+    app: AppHandle,
+    request: ReadSheetValuesRequest,
+) -> Result<Vec<Vec<String>>, String> {
     let config = resolve_google_oauth_config(&app)?;
     let token = valid_access_token(&app, &config)?;
     let spreadsheet_id = request.spreadsheet_id.trim();
@@ -312,7 +329,10 @@ fn google_read_sheet_values(app: AppHandle, request: ReadSheetValuesRequest) -> 
 }
 
 #[tauri::command]
-fn google_resolve_sheet_title(app: AppHandle, request: ResolveSheetTitleRequest) -> Result<String, String> {
+fn google_resolve_sheet_title(
+    app: AppHandle,
+    request: ResolveSheetTitleRequest,
+) -> Result<String, String> {
     let config = resolve_google_oauth_config(&app)?;
     let token = valid_access_token(&app, &config)?;
     let spreadsheet_id = request.spreadsheet_id.trim();
@@ -322,8 +342,12 @@ fn google_resolve_sheet_title(app: AppHandle, request: ResolveSheetTitleRequest)
     resolve_sheet_title(&token, spreadsheet_id, request.gid)
 }
 
-fn read_sheet_values_with_token(token: &str, spreadsheet_id: &str, sheet_name: &str) -> Result<Vec<Vec<String>>, String> {
-    let range = encode_a1_range(&format!("{}!A:Z", quote_sheet_name(sheet_name)));
+fn read_sheet_values_with_token(
+    token: &str,
+    spreadsheet_id: &str,
+    sheet_name: &str,
+) -> Result<Vec<Vec<String>>, String> {
+    let range = encode_a1_range(&format!("{}!A:ZZ", quote_sheet_name(sheet_name)));
     let url = format!("{GOOGLE_SHEETS_URL}/{spreadsheet_id}/values/{range}");
     let response = Client::new()
         .get(url)
@@ -343,10 +367,7 @@ fn read_sheet_values_with_token(token: &str, spreadsheet_id: &str, sheet_name: &
             rows.iter()
                 .map(|row| {
                     if let Some(cells) = row.as_array() {
-                        cells
-                            .iter()
-                            .map(google_cell_to_string)
-                            .collect::<Vec<_>>()
+                        cells.iter().map(google_cell_to_string).collect::<Vec<_>>()
                     } else {
                         Vec::new()
                     }
@@ -358,14 +379,25 @@ fn read_sheet_values_with_token(token: &str, spreadsheet_id: &str, sheet_name: &
 }
 
 #[tauri::command]
-fn google_batch_update_sheet(app: AppHandle, request: BatchUpdateSheetRequest) -> Result<(), String> {
+fn google_batch_update_sheet(
+    app: AppHandle,
+    request: BatchUpdateSheetRequest,
+) -> Result<(), String> {
     let config = resolve_google_config(&app)?;
     let token = valid_access_token(&app, &config)?;
-    batch_update_sheet_values(&token, &config.spreadsheet_id, &config.sheet_name, request.updates)
+    batch_update_sheet_values(
+        &token,
+        &config.spreadsheet_id,
+        &config.sheet_name,
+        request.updates,
+    )
 }
 
 #[tauri::command]
-fn google_batch_update_any_sheet(app: AppHandle, request: BatchUpdateAnySheetRequest) -> Result<(), String> {
+fn google_batch_update_any_sheet(
+    app: AppHandle,
+    request: BatchUpdateAnySheetRequest,
+) -> Result<(), String> {
     let config = resolve_google_oauth_config(&app)?;
     let token = valid_access_token(&app, &config)?;
     let spreadsheet_id = request.spreadsheet_id.trim();
@@ -417,7 +449,10 @@ fn drive_create_training_folder(
 ) -> Result<DriveFolderResult, String> {
     let config = resolve_google_config(&app)?;
     let token = valid_access_token(&app, &config)?;
-    let folder_name = safe_drive_name(&format!("{}_{}", request.training_name, request.issued_date));
+    let folder_name = safe_drive_name(&format!(
+        "{}_{}",
+        request.training_name, request.issued_date
+    ));
     let response = Client::new()
         .post(GOOGLE_DRIVE_FILES_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -435,18 +470,29 @@ fn drive_create_training_folder(
     }
 
     let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
-    let id = body.get("id").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    let id = body
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
     if id.trim().is_empty() {
         return Err("Google Drive 폴더 생성 응답에 폴더 ID가 없습니다.".to_string());
     }
     Ok(DriveFolderResult {
         id,
-        name: body.get("name").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+        name: body
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
 #[tauri::command]
-fn drive_upload_pdf(app: AppHandle, request: UploadPdfRequest) -> Result<UploadedFileResult, String> {
+fn drive_upload_pdf(
+    app: AppHandle,
+    request: UploadPdfRequest,
+) -> Result<UploadedFileResult, String> {
     let config = resolve_google_config(&app)?;
     let token = valid_access_token(&app, &config)?;
     let filename = safe_drive_name(&request.filename);
@@ -459,7 +505,9 @@ fn drive_upload_pdf(app: AppHandle, request: UploadPdfRequest) -> Result<Uploade
     let form = multipart::Form::new()
         .part(
             "metadata",
-            multipart::Part::text(metadata).mime_str("application/json; charset=UTF-8").map_err(|error| error.to_string())?,
+            multipart::Part::text(metadata)
+                .mime_str("application/json; charset=UTF-8")
+                .map_err(|error| error.to_string())?,
         )
         .part(
             "file",
@@ -472,7 +520,10 @@ fn drive_upload_pdf(app: AppHandle, request: UploadPdfRequest) -> Result<Uploade
     let response = Client::new()
         .post(GOOGLE_DRIVE_UPLOAD_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .query(&[("uploadType", "multipart"), ("fields", "id,name,webViewLink")])
+        .query(&[
+            ("uploadType", "multipart"),
+            ("fields", "id,name,webViewLink"),
+        ])
         .multipart(form)
         .send()
         .map_err(|error| error.to_string())?;
@@ -482,7 +533,11 @@ fn drive_upload_pdf(app: AppHandle, request: UploadPdfRequest) -> Result<Uploade
     }
 
     let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
-    let file_id = body.get("id").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    let file_id = body
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
     if file_id.trim().is_empty() {
         return Err("Google Drive 업로드 응답에 파일 ID가 없습니다.".to_string());
     }
@@ -497,13 +552,19 @@ fn drive_upload_pdf(app: AppHandle, request: UploadPdfRequest) -> Result<Uploade
     }
     Ok(UploadedFileResult {
         id: file_id,
-        name: body.get("name").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+        name: body
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
         web_view_link,
     })
 }
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             app_status,
             append_job_log,
@@ -609,9 +670,17 @@ fn read_preconfigured_oauth(app: &AppHandle) -> Result<PreconfiguredOAuth, Strin
     let mut candidates = Vec::new();
     if let Ok(current_dir) = env::current_dir() {
         candidates.push(current_dir.join("google-oauth.local.json"));
-        candidates.push(current_dir.join("src-tauri").join("google-oauth.local.json"));
+        candidates.push(
+            current_dir
+                .join("src-tauri")
+                .join("google-oauth.local.json"),
+        );
         candidates.push(current_dir.join("google-oauth.json"));
-        candidates.push(current_dir.join("src-tauri").join("google-oauth.example.json"));
+        candidates.push(
+            current_dir
+                .join("src-tauri")
+                .join("google-oauth.example.json"),
+        );
     }
     if let Ok(app_dir) = app_data_dir(app) {
         candidates.push(app_dir.join("google-oauth.json"));
@@ -645,10 +714,18 @@ fn read_preconfigured_oauth(app: &AppHandle) -> Result<PreconfiguredOAuth, Strin
 }
 
 fn read_oauth_file(path: &Path) -> Result<PreconfiguredOAuth, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("OAuth 설정 파일을 읽지 못했습니다: {} ({error})", path.display()))?;
-    serde_json::from_str(&content)
-        .map_err(|error| format!("OAuth 설정 파일 형식이 올바르지 않습니다: {} ({error})", path.display()))
+    let content = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "OAuth 설정 파일을 읽지 못했습니다: {} ({error})",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "OAuth 설정 파일 형식이 올바르지 않습니다: {} ({error})",
+            path.display()
+        )
+    })
 }
 
 fn first_non_empty(values: &[&str]) -> String {
@@ -661,8 +738,16 @@ fn first_non_empty(values: &[&str]) -> String {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<T, String> {
-    let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let content = fs::read_to_string(path).map_err(|_| format!("파일을 찾을 수 없습니다: {filename} (경로: {})", path.display()))?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let content = fs::read_to_string(path).map_err(|_| {
+        format!(
+            "파일을 찾을 수 없습니다: {filename} (경로: {})",
+            path.display()
+        )
+    })?;
     serde_json::from_str(&content).map_err(|error| format!("{filename} 파싱 실패: {error}"))
 }
 
@@ -686,7 +771,9 @@ fn write_json_secure<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), Stri
 #[cfg(unix)]
 fn set_owner_only_dir(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path).map_err(|error| error.to_string())?.permissions();
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(path, permissions).map_err(|error| error.to_string())
 }
@@ -699,7 +786,9 @@ fn set_owner_only_dir(_path: &std::path::Path) -> Result<(), String> {
 #[cfg(unix)]
 fn set_owner_only_file(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path).map_err(|error| error.to_string())?.permissions();
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
     permissions.set_mode(0o600);
     fs::set_permissions(path, permissions).map_err(|error| error.to_string())
 }
@@ -750,7 +839,9 @@ fn open_url(url: &str) -> Result<(), String> {
 fn wait_for_oauth_code(listener: TcpListener, expected_state: &str) -> Result<String, String> {
     let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
     let mut buffer = [0_u8; 4096];
-    let size = stream.read(&mut buffer).map_err(|error| error.to_string())?;
+    let size = stream
+        .read(&mut buffer)
+        .map_err(|error| error.to_string())?;
     let request = String::from_utf8_lossy(&buffer[..size]);
     let first_line = request.lines().next().unwrap_or("");
     let path = first_line.split_whitespace().nth(1).unwrap_or("");
@@ -880,7 +971,11 @@ fn quote_sheet_name(sheet_name: &str) -> String {
     format!("'{}'", sheet_name.replace('\'', "''"))
 }
 
-fn resolve_sheet_title(token: &str, spreadsheet_id: &str, gid: Option<i64>) -> Result<String, String> {
+fn resolve_sheet_title(
+    token: &str,
+    spreadsheet_id: &str,
+    gid: Option<i64>,
+) -> Result<String, String> {
     let response = Client::new()
         .get(format!("{GOOGLE_SHEETS_URL}/{spreadsheet_id}"))
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -979,8 +1074,8 @@ fn safe_drive_name(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|character| match character {
-            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '%' | '{' | '}'
-            | '[' | ']' | '^' | '~' | '`' => ' ',
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '%' | '{' | '}' | '['
+            | ']' | '^' | '~' | '`' => ' ',
             _ => character,
         })
         .collect::<String>();

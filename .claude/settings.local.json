@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find C:/Users/user/Desktop/kdy/coding/teacher-training -name .env* -type f)"
+      "Bash(find C:/Users/user/Desktop/kdy/coding/teacher-training -name .env* -type f)",
+      "Bash(pnpm tauri:*)",
+      "Bash(npx tsc *)"
     ]
   }
 }

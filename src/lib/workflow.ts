@@ -20,7 +20,7 @@ export const ROSTER_HEADERS = [
   "학교명",
   "이름",
   "전화번호",
-  "발급횟수",
+  "영수증발급횟수",
   "과정명1",
   "발급날짜1",
   "링크1",
@@ -89,7 +89,7 @@ export type NormalizedRoster = {
 };
 
 export function normalizeText(value: unknown): string {
-  return String(value ?? "").trim();
+  return String(value ?? "").normalize("NFC").trim();
 }
 
 export function normalizePhone(value: unknown): string {
@@ -188,7 +188,7 @@ export function normalizeRosterRows(rows: RosterRow[]): NormalizedRoster[] {
     school: normalizeText(row["학교명"]),
     name: normalizeText(row["이름"]),
     phone: normalizePhone(row["전화번호"]),
-    issueCount: Number.parseInt(normalizeText(row["발급횟수"]) || "0", 10),
+    issueCount: Number.parseInt(normalizeText(row["영수증발급횟수"]) || "0", 10),
     course1: normalizeText(row["과정명1"]),
     issuedAt1: normalizeText(row["발급날짜1"]),
     link1: normalizeText(row["링크1"]),
@@ -206,8 +206,8 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       issues.push({
         severity: "error",
         row: row.rowNumber,
-        field: "발급횟수",
-        message: "발급횟수는 0 이상의 숫자여야 합니다.",
+        field: "영수증발급횟수",
+        message: "영수증발급횟수는 0 이상의 숫자여야 합니다.",
       });
       return;
     }
@@ -221,7 +221,7 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       issues.push({
         severity: "error",
         row: row.rowNumber,
-        message: "발급횟수 0인 행에는 과정명/발급날짜/링크 기록이 없어야 합니다.",
+        message: "영수증발급횟수 0인 행에는 과정명/발급날짜/링크 기록이 없어야 합니다.",
       });
     }
 
@@ -229,7 +229,7 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       issues.push({
         severity: "error",
         row: row.rowNumber,
-        message: "발급횟수 1인 행은 1차 기록만 완전해야 합니다.",
+        message: "영수증발급횟수 1인 행은 1차 기록만 완전해야 합니다.",
       });
     }
 
@@ -237,7 +237,7 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       issues.push({
         severity: "error",
         row: row.rowNumber,
-        message: "발급횟수 2인 행은 1차와 2차 기록이 모두 완전해야 합니다.",
+        message: "영수증발급횟수 2인 행은 1차와 2차 기록이 모두 완전해야 합니다.",
       });
     }
   });
@@ -315,7 +315,7 @@ export function matchRecipients(
         status: "excluded",
         completion,
         roster,
-        reason: "이미 영수증 발급횟수가 2회 이상입니다.",
+        reason: "이미 영수증발급횟수가 2회 이상입니다.",
       };
     }
 

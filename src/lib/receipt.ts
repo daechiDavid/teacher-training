@@ -11,8 +11,8 @@ export type ReceiptPdfInput = {
 
 export async function generateReceiptPdf(input: ReceiptPdfInput): Promise<Uint8Array> {
   const [templateBytes, fontBytes] = await Promise.all([
-    fetchBinaryAsset("/receipt_sample.pdf", "영수증 PDF 템플릿"),
-    fetchBinaryAsset(notoSansGothicUrl, "PDF 한글 폰트"),
+    fetchBinaryAsset("/receipt_sample.pdf", "영수증 양식"),
+    fetchBinaryAsset(notoSansGothicUrl, "영수증 글꼴"),
   ]);
   const pdf = await PDFDocument.load(templateBytes);
   pdf.registerFontkit(fontkit);
@@ -98,7 +98,7 @@ function fitFontSize(font: PDFFont, text: string, maxWidth: number, maxSize: num
 async function fetchBinaryAsset(url: string, label: string): Promise<ArrayBuffer> {
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`${label}을 불러오지 못했습니다. HTTP ${response.status}`);
+    throw new Error(`${label}을 불러오지 못했습니다. 다시 시도해 주세요.`);
   }
   return response.arrayBuffer();
 }
