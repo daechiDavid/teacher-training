@@ -21,7 +21,7 @@ const GOOGLE_DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files"
 const GOOGLE_DRIVE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/drive/v3/files";
 const GOOGLE_SHEETS_URL: &str = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_SCOPES: &str =
-    "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets";
+    "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/spreadsheets";
 
 #[derive(Debug, Serialize)]
 struct AppStatus {
@@ -119,6 +119,20 @@ struct UploadPdfRequest {
     folder_id: String,
     filename: String,
     pdf_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSheetFromSourceFolderRequest {
+    source_spreadsheet_id: String,
+    title: String,
+    values: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreatedSheetResult {
+    spreadsheet_id: String,
+    sheet_name: String,
+    web_view_link: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -408,6 +422,43 @@ fn google_batch_update_any_sheet(
     batch_update_sheet_values(&token, spreadsheet_id, sheet_name, request.updates)
 }
 
+#[tauri::command]
+fn google_create_sheet_from_source_folder(
+    app: AppHandle,
+    request: CreateSheetFromSourceFolderRequest,
+) -> Result<CreatedSheetResult, String> {
+    let config = resolve_google_oauth_config(&app)?;
+    let token = valid_access_token(&app, &config)?;
+    let source_spreadsheet_id = request.source_spreadsheet_id.trim();
+    let title = safe_drive_name(request.title.trim());
+    if source_spreadsheet_id.is_empty() || title.is_empty() {
+        return Err("원본 Google Sheet ID와 생성할 시트 이름은 필수입니다.".to_string());
+    }
+
+    let parent_folder_id = drive_first_parent(&token, source_spreadsheet_id)?;
+    let created = drive_create_google_sheet(&token, &parent_folder_id, &title)?;
+    let sheet_name = resolve_sheet_title(&token, &created.spreadsheet_id, None)?;
+    if !request.values.is_empty() {
+        let last_column = column_label(request.values.iter().map(|row| row.len()).max().unwrap_or(1));
+        let last_row = request.values.len();
+        batch_update_sheet_values(
+            &token,
+            &created.spreadsheet_id,
+            &sheet_name,
+            vec![SheetValueUpdate {
+                range: format!("A1:{last_column}{last_row}"),
+                values: request.values,
+            }],
+        )?;
+    }
+
+    Ok(CreatedSheetResult {
+        spreadsheet_id: created.spreadsheet_id,
+        sheet_name,
+        web_view_link: created.web_view_link,
+    })
+}
+
 fn batch_update_sheet_values(
     token: &str,
     spreadsheet_id: &str,
@@ -440,6 +491,75 @@ fn batch_update_sheet_values(
     } else {
         Err(format_google_error(response))
     }
+}
+
+fn drive_first_parent(token: &str, file_id: &str) -> Result<String, String> {
+    let response = Client::new()
+        .get(format!("{GOOGLE_DRIVE_FILES_URL}/{file_id}"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("fields", "parents"),
+            ("supportsAllDrives", "true"),
+        ])
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format_google_error(response));
+    }
+
+    let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    body.get("parents")
+        .and_then(|value| value.as_array())
+        .and_then(|parents| parents.first())
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .ok_or_else(|| "원본 설문 결과 시트의 상위 폴더를 찾지 못했습니다.".to_string())
+}
+
+fn drive_create_google_sheet(
+    token: &str,
+    parent_folder_id: &str,
+    title: &str,
+) -> Result<CreatedSheetResult, String> {
+    let response = Client::new()
+        .post(GOOGLE_DRIVE_FILES_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("fields", "id,name,webViewLink"),
+            ("supportsAllDrives", "true"),
+        ])
+        .json(&serde_json::json!({
+            "name": title,
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+            "parents": [parent_folder_id],
+        }))
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format_google_error(response));
+    }
+
+    let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    let spreadsheet_id = body
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    if spreadsheet_id.trim().is_empty() {
+        return Err("Google Sheet 생성 응답에 파일 ID가 없습니다.".to_string());
+    }
+    let web_view_link = body
+        .get("webViewLink")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(CreatedSheetResult {
+        spreadsheet_id,
+        sheet_name: String::new(),
+        web_view_link,
+    })
 }
 
 #[tauri::command]
@@ -577,6 +697,7 @@ pub fn run() {
             google_resolve_sheet_title,
             google_batch_update_sheet,
             google_batch_update_any_sheet,
+            google_create_sheet_from_source_folder,
             drive_create_training_folder,
             drive_upload_pdf
         ])
@@ -969,6 +1090,17 @@ fn encode_a1_range(range: &str) -> String {
 
 fn quote_sheet_name(sheet_name: &str) -> String {
     format!("'{}'", sheet_name.replace('\'', "''"))
+}
+
+fn column_label(column_number: usize) -> String {
+    let mut value = column_number;
+    let mut label = String::new();
+    while value > 0 {
+        value -= 1;
+        label.insert(0, (b'A' + (value % 26) as u8) as char);
+        value /= 26;
+    }
+    label
 }
 
 fn resolve_sheet_title(

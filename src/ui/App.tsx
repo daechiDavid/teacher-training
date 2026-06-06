@@ -19,6 +19,7 @@ import {
   normalizeCompletionRows,
   personKey,
   normalizeRosterRows,
+  COMPLETION_HEADERS,
   validateCompletionNiceNumbers,
   validateRosterIntegrity,
   NormalizedCompletion,
@@ -60,6 +61,7 @@ import {
   appendJobLog,
   batchUpdateSheet,
   batchUpdateGoogleSheet,
+  createGoogleSheetFromSourceFolder,
   createDriveTrainingFolder,
   getAppStatus,
   getGoogleConfigStatus,
@@ -91,6 +93,8 @@ type GoogleUrlForm = {
 
 type CompletionSheetForm = {
   spreadsheetUrl: string;
+  trainingName: string;
+  trainingDate: string;
 };
 
 type EvaluationSheetForm = {
@@ -194,6 +198,8 @@ export function App() {
   });
   const [completionSheetForm, setCompletionSheetForm] = useState<CompletionSheetForm>({
     spreadsheetUrl: "",
+    trainingName: "",
+    trainingDate: "",
   });
   const [samplePdfUrl, setSamplePdfUrl] = useState<string | null>(null);
   const [issueProgress, setIssueProgress] = useState<IssueProgressState | null>(null);
@@ -335,19 +341,30 @@ export function App() {
     setNotice(null);
     setBusy(true);
     try {
-      const spreadsheetId = extractSpreadsheetId(completionSheetForm.spreadsheetUrl, "연수 신청자 명단");
+      if (!completionSheetForm.trainingName.trim() || !completionSheetForm.trainingDate.trim()) {
+        throw new Error("강의명과 강의 날짜를 입력하세요.");
+      }
+      const spreadsheetId = extractSpreadsheetId(completionSheetForm.spreadsheetUrl, "설문 결과");
       const gid = extractGoogleSheetGid(completionSheetForm.spreadsheetUrl);
-      const sheetName = await resolveGoogleSheetTitle(spreadsheetId, gid);
       const rawRows = await readGoogleSheetValues(spreadsheetId, gid);
-      const parsed = parseCompletionWorkbookRows(rawRows);
+      const preparedRows = buildCompletionSheetRowsFromFormResults(
+        rawRows,
+        completionSheetForm.trainingName,
+      );
+      const createdSheet = await createGoogleSheetFromSourceFolder(
+        spreadsheetId,
+        buildResultSheetTitle(completionSheetForm.trainingDate),
+        preparedRows,
+      );
+      const parsed = parseCompletionWorkbookRows(preparedRows);
       if (parsed.missingHeaders.length) {
-        throw new Error(`연수 신청자 명단에서 필수 항목을 찾지 못했습니다: ${parsed.missingHeaders.join(", ")}`);
+        throw new Error(`이수 처리용 시트에서 필수 항목을 찾지 못했습니다: ${parsed.missingHeaders.join(", ")}`);
       }
       const normalized = normalizeApplicantRows(parsed.rows);
       const trainingNameOptions = getTrainingNameOptions(normalized);
       const people = buildAttendancePeople(normalized);
       setDocumentRows(normalized);
-      setDocumentSheetSource({ spreadsheetId, sheetName });
+      setDocumentSheetSource({ spreadsheetId: createdSheet.spreadsheet_id, sheetName: createdSheet.sheet_name });
       setDocumentPeople(people);
       setCaptureRows(buildDefaultCaptureRows(people));
       setCaptureEvidenceRows([createEmptyCaptureEvidenceRow()]);
@@ -359,17 +376,18 @@ export function App() {
       setEvaluationSheetForm({ spreadsheetUrl: "" });
       setEvaluationSummary(null);
       setDocumentSourceFile({
-        name: `연수 신청자 명단: ${sheetName}`,
+        name: `이수 처리용 시트: ${createdSheet.sheet_name}`,
         rowCount: normalized.length,
         missingHeaders: parsed.missingHeaders,
       });
       setDocumentForm((current) => ({
         ...current,
-        trainingName: current.trainingName || trainingNameOptions[0] || "",
+        trainingName: completionSheetForm.trainingName.trim() || trainingNameOptions[0] || current.trainingName,
+        trainingDate: completionSheetForm.trainingDate.trim() || current.trainingDate,
       }));
       setDocumentWorkflowStep("doc1");
       clearCurrentDocument();
-      setNotice(`${normalized.length.toLocaleString()}명의 연수 신청자를 불러왔습니다.`);
+      setNotice(`${normalized.length.toLocaleString()}명의 설문 응답으로 이수 처리용 시트를 만들었습니다: ${createdSheet.web_view_link}`);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
@@ -772,7 +790,7 @@ export function App() {
     setStep("upload");
     setCompletionFile(null);
     setCompletionRows([]);
-    setCompletionSheetForm({ spreadsheetUrl: "" });
+    setCompletionSheetForm({ spreadsheetUrl: "", trainingName: "", trainingDate: "" });
   }
 
   function returnToUploadFromReview() {
@@ -1220,9 +1238,19 @@ function CompletionDocumentStage({
         title="이수 서류 작성"
         description="연수 신청자 명단, 줌 접속기록, 평가 결과를 기준으로 제출용 문서를 만듭니다."
       >
-        <CompletionSheetUrlForm value={sheetForm} busy={busy} onChange={onSheetFormChange} />
-        <button className="primary-action" type="button" onClick={onLoad} disabled={busy || !sheetForm.spreadsheetUrl.trim()}>
-          연수 신청자 명단 불러오기
+        <CompletionSheetUrlForm
+          value={sheetForm}
+          busy={busy}
+          onChange={onSheetFormChange}
+          mode="form-results"
+        />
+        <button
+          className="primary-action"
+          type="button"
+          onClick={onLoad}
+          disabled={busy || !sheetForm.spreadsheetUrl.trim() || !sheetForm.trainingName.trim() || !sheetForm.trainingDate.trim()}
+        >
+          이수 처리용 시트 만들기
         </button>
         <FileStatus title="연수 신청자 명단" state={sourceFile} />
         {sourceRows.length ? (
@@ -1962,23 +1990,51 @@ function CompletionSheetUrlForm({
   value,
   busy,
   onChange,
+  mode = "completion-sheet",
 }: {
   value: CompletionSheetForm;
   busy: boolean;
   onChange: (value: CompletionSheetForm) => void;
+  mode?: "completion-sheet" | "form-results";
 }) {
   return (
     <div className="settings-form">
       <label>
-        <span>연수 신청자 명단 주소</span>
+        <span>{mode === "form-results" ? "설문 결과 주소" : "연수 신청자 명단 주소"}</span>
         <input
           value={value.spreadsheetUrl}
-          onChange={(event) => onChange({ spreadsheetUrl: event.target.value })}
+          onChange={(event) => onChange({ ...value, spreadsheetUrl: event.target.value })}
           placeholder="구글 스프레드시트 주소를 붙여넣으세요"
           disabled={busy}
         />
       </label>
-      <p className="muted">주소에 특정 탭 정보가 있으면 해당 탭을, 없으면 첫 번째 탭을 읽습니다.</p>
+      {mode === "form-results" ? (
+        <>
+          <label>
+            <span>강의명</span>
+            <input
+              value={value.trainingName}
+              onChange={(event) => onChange({ ...value, trainingName: event.target.value })}
+              placeholder="이수 처리용 시트 B열에 들어갈 강의명"
+              disabled={busy}
+            />
+          </label>
+          <label>
+            <span>강의 날짜</span>
+            <input
+              value={value.trainingDate}
+              onChange={(event) => onChange({ ...value, trainingDate: event.target.value })}
+              placeholder="예: 2026-06-06"
+              disabled={busy}
+            />
+          </label>
+        </>
+      ) : null}
+      <p className="muted">
+        {mode === "form-results"
+          ? "설문 결과의 C열부터 K열까지를 복사해 같은 폴더에 이수 처리용 Google Sheet를 만듭니다."
+          : "주소에 특정 탭 정보가 있으면 해당 탭을, 없으면 첫 번째 탭을 읽습니다."}
+      </p>
     </div>
   );
 }
@@ -2164,6 +2220,45 @@ function ResultTable({ results }: { results: ReturnType<typeof matchRecipients> 
       </table>
     </div>
   );
+}
+
+function buildCompletionSheetRowsFromFormResults(rawRows: unknown[][], trainingName: string): string[][] {
+  const rows = rawRows
+    .slice(1)
+    .map((row) => row.slice(2, 11).map((cell) => String(cell ?? "").trim()))
+    .filter((cells) => cells.some(Boolean));
+
+  return [
+    [...COMPLETION_HEADERS],
+    ...rows.map((cells, index) => [
+      String(index + 1),
+      trainingName.trim(),
+      ...cells,
+      "",
+      "",
+      "",
+    ]),
+  ];
+}
+
+function buildResultSheetTitle(trainingDate: string): string {
+  return `(결과)${formatMonthDay(trainingDate)}직무연수`;
+}
+
+function formatMonthDay(value: string): string {
+  const trimmed = value.trim();
+  const dateMatch = trimmed.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+  if (dateMatch) {
+    return `${dateMatch[2].padStart(2, "0")}${dateMatch[3].padStart(2, "0")}`;
+  }
+  const shortMatch = trimmed.match(/^(\d{1,2})[-./](\d{1,2})$/);
+  if (shortMatch) {
+    return `${shortMatch[1].padStart(2, "0")}${shortMatch[2].padStart(2, "0")}`;
+  }
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length >= 8) return digits.slice(4, 8);
+  if (digits.length >= 4) return digits.slice(0, 4);
+  return "0000";
 }
 
 function buildCompletionRecordUpdates(

@@ -93,6 +93,24 @@ export async function resolveGoogleSheetTitle(spreadsheetId: string, gid?: numbe
   });
 }
 
+export async function createGoogleSheetFromSourceFolder(
+  sourceSpreadsheetId: string,
+  title: string,
+  values: string[][],
+): Promise<{
+  spreadsheet_id: string;
+  sheet_name: string;
+  web_view_link: string;
+}> {
+  return invoke("google_create_sheet_from_source_folder", {
+    request: {
+      source_spreadsheet_id: sourceSpreadsheetId,
+      title,
+      values,
+    },
+  });
+}
+
 export async function createDriveTrainingFolder(trainingName: string, issuedDate: string): Promise<{
   id: string;
   name: string;
