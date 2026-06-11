@@ -98,7 +98,26 @@ const HWPX_TEMPLATES = {
   evaluation: "/templates/evaluation_summary.hwpx",
 } as const;
 
-type HwpxFiles = Record<string, Uint8Array>;
+const ZIP_ENTRIES = Symbol("hwpxZipEntries");
+
+type ZipEntryMeta = {
+  name: string;
+  method: number;
+  flags: number;
+  versionMadeBy: number;
+  versionNeeded: number;
+  modifiedTime: number;
+  modifiedDate: number;
+  localExtra: Uint8Array;
+  centralExtra: Uint8Array;
+  comment: Uint8Array;
+  internalAttrs: number;
+  externalAttrs: number;
+};
+
+type HwpxFiles = Record<string, Uint8Array> & {
+  [ZIP_ENTRIES]?: ZipEntryMeta[];
+};
 
 type EmbeddedImageRef = {
   refId: string;
@@ -477,6 +496,20 @@ export function buildAttendanceFilename(form: AttendanceBaseForm, label: string,
   return `${safeFileSegment(label) || label}.${extension}`;
 }
 
+export async function createHwpxFromTemplateUrl(
+  templateUrl: string,
+  replacements: Record<string, string>,
+): Promise<Blob> {
+  const response = await fetch(templateUrl);
+  if (!response.ok) throw new Error("한글 문서 양식을 불러오지 못했습니다. 다시 시도해 주세요.");
+  const files = await unzipArchive(new Uint8Array(await response.arrayBuffer()));
+  let section = decodeUtf8(files["Contents/section0.xml"]);
+  section = replaceTokensAndInvalidateLineSegments(section, replacements);
+  files["Contents/section0.xml"] = encodeUtf8(section);
+  updatePreviewText(files, section);
+  return new Blob([await createZip(files)], { type: "application/x-hwpml-package" });
+}
+
 async function createHwpx(
   template: keyof typeof HWPX_TEMPLATES,
   form: AttendanceBaseForm,
@@ -497,7 +530,7 @@ async function createHwpx(
   });
   files["Contents/section0.xml"] = encodeUtf8(section);
   updatePreviewText(files, section);
-  return new Blob([createZip(files)], { type: "application/x-hwpml-package" });
+  return new Blob([await createZip(files)], { type: "application/x-hwpml-package" });
 }
 
 function rowToTemplateValues(row: CaptureAttendanceRow | ZoomAttendanceRow | SummaryAttendanceRow): Record<string, string> {
@@ -694,6 +727,15 @@ function replaceTokens(value: string, replacements: Record<string, string>): str
     const replacement = replacements[key.trim()] ?? "";
     return replacement.startsWith("<hp:pic ") ? replacement : match;
   }).replace(/\{\{([^}]+)\}\}/g, (_, key: string) => escapeXml(replacements[key.trim()] ?? ""));
+}
+
+function replaceTokensAndInvalidateLineSegments(value: string, replacements: Record<string, string>): string {
+  const withParagraphs = value.replace(/<hp:p\b[\s\S]*?<\/hp:p>/g, (paragraph) => {
+    const rendered = replaceTokens(paragraph, replacements);
+    if (rendered === paragraph) return paragraph;
+    return rendered.replace(/<hp:linesegarray>[\s\S]*?<\/hp:linesegarray>/g, "");
+  });
+  return replaceTokens(withParagraphs, replacements);
 }
 
 async function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Promise<EmbeddedEvidenceRow[]> {
@@ -925,12 +967,17 @@ function imageMime(path: string): string {
 
 async function unzipArchive(bytes: Uint8Array): Promise<HwpxFiles> {
   const files: HwpxFiles = {};
+  const entries: ZipEntryMeta[] = [];
+  const centralEntries = readCentralDirectory(bytes);
   const decoder = new TextDecoder();
   let offset = 0;
   while (offset + 30 <= bytes.length) {
     const view = new DataView(bytes.buffer, bytes.byteOffset + offset);
     if (view.getUint32(0, true) !== 0x04034b50) break;
+    const flags = view.getUint16(6, true);
     const method = view.getUint16(8, true);
+    const modifiedTime = view.getUint16(10, true);
+    const modifiedDate = view.getUint16(12, true);
     const compressedSize = view.getUint32(18, true);
     const fileNameLength = view.getUint16(26, true);
     const extraLength = view.getUint16(28, true);
@@ -938,15 +985,75 @@ async function unzipArchive(bytes: Uint8Array): Promise<HwpxFiles> {
     const dataStart = nameStart + fileNameLength + extraLength;
     const dataEnd = dataStart + compressedSize;
     const name = decoder.decode(bytes.slice(nameStart, nameStart + fileNameLength));
+    const localExtra = bytes.slice(nameStart + fileNameLength, dataStart);
     const compressed = bytes.slice(dataStart, dataEnd);
+    const central = centralEntries.get(name);
     files[name] = method === 0 ? compressed : await inflateRaw(compressed);
+    entries.push({
+      name,
+      method,
+      flags,
+      versionMadeBy: central?.versionMadeBy ?? 20,
+      versionNeeded: central?.versionNeeded ?? 20,
+      modifiedTime,
+      modifiedDate,
+      localExtra,
+      centralExtra: central?.centralExtra ?? localExtra,
+      comment: central?.comment ?? new Uint8Array(),
+      internalAttrs: central?.internalAttrs ?? 0,
+      externalAttrs: central?.externalAttrs ?? 0,
+    });
     offset = dataEnd;
   }
+  files[ZIP_ENTRIES] = entries;
   return files;
+}
+
+function readCentralDirectory(bytes: Uint8Array): Map<string, Omit<ZipEntryMeta, "method" | "flags" | "modifiedTime" | "modifiedDate" | "localExtra">> {
+  const entries = new Map<string, Omit<ZipEntryMeta, "method" | "flags" | "modifiedTime" | "modifiedDate" | "localExtra">>();
+  const decoder = new TextDecoder();
+  const maxCommentLength = 0xffff;
+  const eocdMinLength = 22;
+  const start = Math.max(0, bytes.length - eocdMinLength - maxCommentLength);
+  for (let offset = bytes.length - eocdMinLength; offset >= start; offset -= 1) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset);
+    if (view.getUint32(0, true) !== 0x06054b50) continue;
+    const centralCount = view.getUint16(10, true);
+    let centralOffset = view.getUint32(16, true);
+    for (let index = 0; index < centralCount && centralOffset + 46 <= bytes.length; index += 1) {
+      const centralView = new DataView(bytes.buffer, bytes.byteOffset + centralOffset);
+      if (centralView.getUint32(0, true) !== 0x02014b50) break;
+      const nameLength = centralView.getUint16(28, true);
+      const extraLength = centralView.getUint16(30, true);
+      const commentLength = centralView.getUint16(32, true);
+      const nameStart = centralOffset + 46;
+      const extraStart = nameStart + nameLength;
+      const commentStart = extraStart + extraLength;
+      const name = decoder.decode(bytes.slice(nameStart, nameStart + nameLength));
+      entries.set(name, {
+        name,
+        versionMadeBy: centralView.getUint16(4, true),
+        versionNeeded: centralView.getUint16(6, true),
+        centralExtra: bytes.slice(extraStart, commentStart),
+        comment: bytes.slice(commentStart, commentStart + commentLength),
+        internalAttrs: centralView.getUint16(36, true),
+        externalAttrs: centralView.getUint32(38, true),
+      });
+      centralOffset = commentStart + commentLength;
+    }
+    break;
+  }
+  return entries;
 }
 
 async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
+  if (!data.length) return data;
+  const stream = new Blob([data]).stream().pipeThrough(new CompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
@@ -959,39 +1066,83 @@ function decodeUtf8(value: Uint8Array | undefined): string {
   return new TextDecoder().decode(value);
 }
 
-function createZip(files: HwpxFiles): Uint8Array {
+async function createZip(files: HwpxFiles): Promise<Uint8Array> {
   const encoder = new TextEncoder();
-  const records = Object.entries(files).map(([name, data]) => ({ name, nameBytes: encoder.encode(name), data }));
+  const known = new Set<string>();
+  const records = [
+    ...(files[ZIP_ENTRIES] ?? []).flatMap((meta) => {
+      const data = files[meta.name];
+      if (!data) return [];
+      known.add(meta.name);
+      return [{ ...meta, data }];
+    }),
+    ...Object.entries(files)
+      .filter(([name]) => !known.has(name))
+      .map(([name, data]) => ({
+        name,
+        method: name === "mimetype" ? 0 : 8,
+        flags: 0,
+        versionMadeBy: 20,
+        versionNeeded: 20,
+        modifiedTime: 0,
+        modifiedDate: 0,
+        localExtra: new Uint8Array(),
+        centralExtra: new Uint8Array(),
+        comment: new Uint8Array(),
+        internalAttrs: 0,
+        externalAttrs: 0,
+        data,
+      })),
+  ].map((entry) => ({ ...entry, nameBytes: encoder.encode(entry.name) }));
   const chunks: Uint8Array[] = [];
   const centralDirectory: Uint8Array[] = [];
   let offset = 0;
-  records.forEach((file) => {
+  for (const file of records) {
     const crc = crc32(file.data);
-    const local = new Uint8Array(30 + file.nameBytes.length);
+    const method = file.method === 0 ? 0 : 8;
+    const flags = method === 8 ? file.flags & ~0x6 : file.flags;
+    const payload = method === 0 ? file.data : await deflateRaw(file.data);
+    const local = new Uint8Array(30 + file.nameBytes.length + file.localExtra.length);
     const localView = new DataView(local.buffer);
     localView.setUint32(0, 0x04034b50, true);
-    localView.setUint16(4, 20, true);
+    localView.setUint16(4, file.versionNeeded, true);
+    localView.setUint16(6, flags, true);
+    localView.setUint16(8, method, true);
+    localView.setUint16(10, file.modifiedTime, true);
+    localView.setUint16(12, file.modifiedDate, true);
     localView.setUint32(14, crc, true);
-    localView.setUint32(18, file.data.length, true);
+    localView.setUint32(18, payload.length, true);
     localView.setUint32(22, file.data.length, true);
     localView.setUint16(26, file.nameBytes.length, true);
+    localView.setUint16(28, file.localExtra.length, true);
     local.set(file.nameBytes, 30);
-    chunks.push(local, file.data);
+    local.set(file.localExtra, 30 + file.nameBytes.length);
+    chunks.push(local, payload);
 
-    const central = new Uint8Array(46 + file.nameBytes.length);
+    const central = new Uint8Array(46 + file.nameBytes.length + file.centralExtra.length + file.comment.length);
     const centralView = new DataView(central.buffer);
     centralView.setUint32(0, 0x02014b50, true);
-    centralView.setUint16(4, 20, true);
-    centralView.setUint16(6, 20, true);
+    centralView.setUint16(4, file.versionMadeBy, true);
+    centralView.setUint16(6, file.versionNeeded, true);
+    centralView.setUint16(8, flags, true);
+    centralView.setUint16(10, method, true);
+    centralView.setUint16(12, file.modifiedTime, true);
+    centralView.setUint16(14, file.modifiedDate, true);
     centralView.setUint32(16, crc, true);
-    centralView.setUint32(20, file.data.length, true);
+    centralView.setUint32(20, payload.length, true);
     centralView.setUint32(24, file.data.length, true);
     centralView.setUint16(28, file.nameBytes.length, true);
+    centralView.setUint16(30, file.centralExtra.length, true);
+    centralView.setUint16(32, file.comment.length, true);
+    centralView.setUint16(36, file.internalAttrs, true);
+    centralView.setUint32(38, file.externalAttrs, true);
     centralView.setUint32(42, offset, true);
     central.set(file.nameBytes, 46);
+    central.set(file.centralExtra, 46 + file.nameBytes.length);
+    central.set(file.comment, 46 + file.nameBytes.length + file.centralExtra.length);
     centralDirectory.push(central);
-    offset += local.length + file.data.length;
-  });
+    offset += local.length + payload.length;
+  }
   const centralOffset = offset;
   const centralSize = centralDirectory.reduce((sum, chunk) => sum + chunk.length, 0);
   const end = new Uint8Array(22);

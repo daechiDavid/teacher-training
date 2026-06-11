@@ -10,7 +10,7 @@ import {
   Settings,
   UploadCloud,
 } from "lucide-react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -61,11 +61,13 @@ import {
   appendJobLog,
   batchUpdateSheet,
   batchUpdateGoogleSheet,
+  createPreliminaryGoogleAssets,
   createGoogleSheetFromSourceFolder,
   createDriveTrainingFolder,
   getAppStatus,
   getGoogleConfigStatus,
   GoogleConfigStatus,
+  openExternalUrl,
   readGoogleRosterValues,
   readGoogleSheetValues,
   resolveGoogleSheetTitle,
@@ -75,6 +77,13 @@ import {
   uploadPdfToDrive,
 } from "../lib/google";
 import { generateReceiptPdf, todayLocalDate } from "../lib/receipt";
+import {
+  buildConsentFormTitle,
+  buildPreliminaryFolderName,
+  createPreliminaryDocuments,
+  parseTrainingDate,
+  PreliminaryDocumentForm,
+} from "../lib/preDocuments";
 
 type LoadedFileState = {
   name: string;
@@ -82,9 +91,9 @@ type LoadedFileState = {
   missingHeaders: string[];
 };
 
-type WorkflowStep = "settings" | "upload" | "review" | "issue";
+type WorkflowStep = "upload" | "review" | "issue";
 type DocumentWorkflowStep = "source" | "doc1" | "doc2" | "doc3" | "doc5" | "doc7" | "done";
-type ActiveTask = "completion" | "receipt" | null;
+type ActiveTask = "settings" | "preliminary" | "completion" | "receipt" | null;
 
 type GoogleUrlForm = {
   spreadsheetUrl: string;
@@ -131,6 +140,25 @@ async function saveDocumentAs(doc: GeneratedDocument): Promise<void> {
   await writeFile(path, bytes);
 }
 
+async function saveDocumentsToFolder(documents: GeneratedDocument[]): Promise<string | null> {
+  const folderPath = await open({
+    directory: true,
+    multiple: false,
+    title: "사전 문서를 저장할 폴더를 선택하세요",
+  });
+  if (!folderPath || Array.isArray(folderPath)) return null;
+  for (const document of documents) {
+    const bytes = new Uint8Array(await document.blob.arrayBuffer());
+    await writeFile(joinPath(folderPath, document.filename), bytes);
+  }
+  return folderPath;
+}
+
+function joinPath(folderPath: string, filename: string): string {
+  const separator = folderPath.includes("\\") ? "\\" : "/";
+  return `${folderPath.replace(/[\\/]+$/, "")}${separator}${filename}`;
+}
+
 type IssueProgressState = {
   current: number;
   total: number;
@@ -141,6 +169,29 @@ type IssueCompletionState = {
   count: number;
   rosterUrl: string;
   folderLinks: Array<{ name: string; url: string }>;
+};
+
+type PreliminaryGoogleAssetsState = {
+  items: Array<{
+    label: string;
+    folderUrl: string;
+    formUrl: string;
+  }>;
+};
+
+type PreliminaryDownloadState = {
+  status: "idle" | "done";
+  folderPath: string;
+};
+
+type PreliminaryImageSet = {
+  lectureDescription: File | null;
+  instructorIntro: File | null;
+};
+
+type PreliminaryImageForm = {
+  training1: PreliminaryImageSet;
+  training2: PreliminaryImageSet;
 };
 
 function createEmptyCaptureEvidenceRow(): CaptureEvidenceRow {
@@ -154,8 +205,19 @@ function createEmptyCaptureEvidenceRow(): CaptureEvidenceRow {
 }
 
 export function App() {
-  const [step, setStep] = useState<WorkflowStep>("settings");
+  const [step, setStep] = useState<WorkflowStep>("upload");
   const [activeTask, setActiveTask] = useState<ActiveTask>(null);
+  const [preliminaryForm, setPreliminaryForm] = useState<PreliminaryDocumentForm>({
+    training1: { trainingName: "", trainingDate: "", instructorName: "" },
+    training2: { trainingName: "", trainingDate: "", instructorName: "" },
+  });
+  const [preliminaryImages, setPreliminaryImages] = useState<PreliminaryImageForm>({
+    training1: { lectureDescription: null, instructorIntro: null },
+    training2: { lectureDescription: null, instructorIntro: null },
+  });
+  const [preliminaryDocuments, setPreliminaryDocuments] = useState<GeneratedDocument[]>([]);
+  const [preliminaryAssets, setPreliminaryAssets] = useState<PreliminaryGoogleAssetsState | null>(null);
+  const [preliminaryDownload, setPreliminaryDownload] = useState<PreliminaryDownloadState>({ status: "idle", folderPath: "" });
   const [completionFile, setCompletionFile] = useState<LoadedFileState | null>(null);
   const [rosterFile, setRosterFile] = useState<LoadedFileState | null>(null);
   const [completionRows, setCompletionRows] = useState<ReturnType<typeof normalizeCompletionRows>>([]);
@@ -241,7 +303,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (step !== "issue" || !eligibleResults[0]) {
+    if (step !== "issue" || !eligibleResults[0] || !completionSheetForm.trainingDate.trim()) {
       setSamplePdfUrl((current) => {
         if (current) URL.revokeObjectURL(current);
         return null;
@@ -257,6 +319,7 @@ export function App() {
         completion: first.completion,
         roster: first.roster,
         issuedDate: todayLocalDate(),
+        trainingPeriod: buildReceiptTrainingPeriod(completionSheetForm.trainingDate),
       });
       if (cancelled) return;
       const nextUrl = URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" }));
@@ -267,13 +330,13 @@ export function App() {
     }
 
     createSample().catch((sampleError) => {
-      setError(sampleError instanceof Error ? sampleError.message : "샘플 영수증을 생성하지 못했습니다.");
+      setError(sampleError instanceof Error ? sampleError.message : String(sampleError || "샘플 영수증을 생성하지 못했습니다."));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [eligibleResults, step]);
+  }, [completionSheetForm.trainingDate, eligibleResults, step]);
 
   async function refreshGoogleStatus(options?: { initialize?: boolean }) {
     const status = await getGoogleConfigStatus();
@@ -295,8 +358,8 @@ export function App() {
     try {
       await startGoogleOAuth();
       const status = await refreshGoogleStatus();
-      setStep(status.configured ? "upload" : "settings");
-      setActiveTask(null);
+      setStep("upload");
+      setActiveTask(status.configured ? null : "settings");
       setNotice("구글 로그인이 완료되었습니다.");
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : String(authError));
@@ -311,7 +374,7 @@ export function App() {
     try {
       await googleLogout();
       await refreshGoogleStatus();
-      setStep("settings");
+      setStep("upload");
       setActiveTask(null);
       setNotice("구글 로그아웃이 완료되었습니다. 다른 계정을 사용하려면 다시 로그인하세요.");
     } catch (logoutError) {
@@ -324,9 +387,15 @@ export function App() {
   function chooseTask(task: Exclude<ActiveTask, null>) {
     setError(null);
     setNotice(null);
+    if (task !== "settings" && !googleStatus?.configured) {
+      setActiveTask("settings");
+      setStep("upload");
+      setNotice("작업을 시작하려면 전체명단 주소와 작업 루트 폴더를 먼저 저장하세요.");
+      return;
+    }
     setActiveTask(task);
     if (task === "receipt") {
-      setStep(googleStatus?.configured ? "upload" : "settings");
+      setStep("upload");
     }
   }
 
@@ -334,6 +403,66 @@ export function App() {
     setError(null);
     setNotice(null);
     setActiveTask(null);
+  }
+
+  async function savePreliminaryDocuments() {
+    setError(null);
+    try {
+      const folderPath = await saveDocumentsToFolder(preliminaryDocuments);
+      if (!folderPath) return;
+      setPreliminaryDownload({ status: "done", folderPath });
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    }
+  }
+
+  async function openGeneratedLink(url: string) {
+    setError(null);
+    try {
+      await openExternalUrl(url);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : String(openError));
+    }
+  }
+
+  async function generatePreliminaryAssets() {
+    setError(null);
+    setNotice(null);
+    setPreliminaryAssets(null);
+    setPreliminaryDocuments([]);
+    setPreliminaryDownload({ status: "idle", folderPath: "" });
+    setBusy(true);
+    try {
+      validatePreliminaryForm(preliminaryForm);
+      validatePreliminaryImages(preliminaryImages);
+      const documents = await createPreliminaryDocuments(preliminaryForm);
+      if (!googleStatus?.drive_parent_folder_id) throw new Error("기본 설정에서 작업 루트 폴더를 먼저 저장하세요.");
+      const trainingImageInputs = [preliminaryImages.training1, preliminaryImages.training2];
+      const assetsByTraining = await Promise.all([preliminaryForm.training1, preliminaryForm.training2].map(async (training, index) => {
+        const formTitle = buildConsentFormTitle(training.trainingDate);
+        const images = await buildPreliminaryFormImages(trainingImageInputs[index]);
+        return createPreliminaryGoogleAssets({
+          rootFolderId: googleStatus.drive_parent_folder_id,
+          folderName: buildPreliminaryFolderName(training.trainingDate),
+          formTemplateId: "1Hz1l6bF2ikqp0It9FSx3m0OgwdaIZxQBzYsl3lS0QHo",
+          formTitle,
+          images,
+        });
+      }));
+      setPreliminaryDocuments(documents);
+      setPreliminaryAssets({
+        items: assetsByTraining.map((assets, index) => ({
+          label: `${index + 1}. ${index === 0 ? preliminaryForm.training1.trainingName : preliminaryForm.training2.trainingName}`,
+          folderUrl: buildDriveFolderUrl(assets.folder_id),
+          formUrl: assets.form_url,
+        })),
+      });
+      setNotice("사전 문서와 Google 설문 자산을 만들었습니다.");
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : String(createError));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function loadCompletionDocumentSource() {
@@ -700,7 +829,8 @@ export function App() {
       });
       await refreshGoogleStatus();
       setStep("upload");
-      setNotice("기본 설정을 저장했습니다. 이후 실행에서는 이 단계를 건너뜁니다.");
+      setActiveTask(null);
+      setNotice("기본 설정을 저장했습니다.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
@@ -713,6 +843,7 @@ export function App() {
     setNotice(null);
     setBusy(true);
     try {
+      parseTrainingDate(completionSheetForm.trainingDate);
       const spreadsheetId = extractSpreadsheetId(completionSheetForm.spreadsheetUrl, "이수자 명단");
       const gid = extractGoogleSheetGid(completionSheetForm.spreadsheetUrl);
       const rawRows = await readGoogleSheetValues(spreadsheetId, gid);
@@ -810,6 +941,10 @@ export function App() {
       setError("구글 로그인과 기본 설정을 먼저 완료하세요.");
       return;
     }
+    if (!completionSheetForm.trainingDate.trim()) {
+      setError("영수증에 표시할 연수기간 날짜를 선택하세요.");
+      return;
+    }
 
     setError(null);
     setNotice(null);
@@ -822,6 +957,7 @@ export function App() {
     setBusy(true);
     try {
       const issuedDate = todayLocalDate();
+      const trainingPeriod = buildReceiptTrainingPeriod(completionSheetForm.trainingDate);
       const { run_id: runId } = await getAppStatus();
       const folderByTraining = new Map<string, { id: string; name: string }>();
       const completionRecordUpdates = buildCompletionRecordUpdates(completionRows, rosterRows, rosterHeaders);
@@ -848,7 +984,7 @@ export function App() {
             label: `${result.completion.name} 영수증 만드는 중`,
           });
           if (!folder) {
-            folder = await createDriveTrainingFolder(trainingName, issuedDate);
+            folder = await createDriveTrainingFolder(completionSheetForm.trainingDate);
             folderByTraining.set(trainingName, folder);
           }
 
@@ -856,6 +992,7 @@ export function App() {
             completion: result.completion,
             roster: result.roster,
             issuedDate,
+            trainingPeriod,
           });
           setIssueProgress({
             current: index,
@@ -950,6 +1087,29 @@ export function App() {
         <LoginGate busy={busy} status={googleStatus} onLogin={connectGoogle} />
       ) : activeTask === null ? (
         <TaskMenu onChoose={chooseTask} />
+      ) : activeTask === "settings" ? (
+        <SettingsStage
+          busy={busy}
+          form={googleForm}
+          onBack={returnToMenu}
+          onFormChange={setGoogleForm}
+          onSave={saveBaseSettings}
+        />
+      ) : activeTask === "preliminary" ? (
+        <PreliminaryDocumentStage
+          busy={busy}
+          form={preliminaryForm}
+          images={preliminaryImages}
+          documents={preliminaryDocuments}
+          downloadState={preliminaryDownload}
+          assets={preliminaryAssets}
+          onBack={returnToMenu}
+          onFormChange={setPreliminaryForm}
+          onImagesChange={setPreliminaryImages}
+          onCreate={generatePreliminaryAssets}
+          onSaveDocuments={savePreliminaryDocuments}
+          onOpenLink={openGeneratedLink}
+        />
       ) : activeTask === "completion" ? (
         <CompletionDocumentStage
           busy={busy}
@@ -996,38 +1156,22 @@ export function App() {
             메뉴로 돌아가기
           </button>
           <Progress current={step} configured={Boolean(googleStatus?.configured)} />
-          {step === "settings" ? (
-            <StepCard
-              icon={<Settings />}
-              title="기본 설정"
-              description="전체명단 주소와 영수증 저장 폴더 주소를 한 번만 저장합니다."
-            >
-              <GoogleUrlSettingsForm value={googleForm} busy={busy} onChange={setGoogleForm} />
-              <button className="primary-action" type="button" onClick={saveBaseSettings} disabled={busy}>
-                기본 설정 저장
-              </button>
-            </StepCard>
-          ) : null}
-
           {step === "upload" ? (
             <StepCard
               icon={<FileSpreadsheet />}
               title="이수자 명단 불러오기"
               description="이수자 명단 주소를 입력하면 저장된 전체명단과 자동으로 대조합니다."
             >
-              <CompletionSheetUrlForm value={completionSheetForm} busy={busy} onChange={setCompletionSheetForm} />
+              <CompletionSheetUrlForm value={completionSheetForm} busy={busy} onChange={setCompletionSheetForm} mode="receipt-sheet" />
               <button
                 className="primary-action"
                 type="button"
                 onClick={loadCompletionFromGoogleSheet}
-                disabled={busy || !completionSheetForm.spreadsheetUrl.trim()}
+                disabled={busy || !completionSheetForm.spreadsheetUrl.trim() || !completionSheetForm.trainingDate.trim()}
               >
                 이수자 명단 불러오기
               </button>
               <FileStatus title="이수자 명단" state={completionFile} />
-              <button className="secondary-action" type="button" onClick={() => setStep("settings")} disabled={busy}>
-                기본 설정 수정
-              </button>
             </StepCard>
           ) : null}
 
@@ -1079,7 +1223,7 @@ export function App() {
                       className="primary-action"
                       type="button"
                       onClick={generateUploadAndRecord}
-                      disabled={busy || !samplePdfUrl}
+                      disabled={busy || !samplePdfUrl || !completionSheetForm.trainingDate.trim()}
                     >
                       샘플 이상 없음 · 전체 저장 시작
                     </button>
@@ -1137,6 +1281,14 @@ function LoginGate({
 function TaskMenu({ onChoose }: { onChoose: (task: Exclude<ActiveTask, null>) => void }) {
   return (
     <section className="task-menu">
+      <button className="task-button" type="button" onClick={() => onChoose("settings")}>
+        <Settings size={26} />
+        <span>기본 설정</span>
+      </button>
+      <button className="task-button" type="button" onClick={() => onChoose("preliminary")}>
+        <FolderUp size={26} />
+        <span>사전 문서 작성</span>
+      </button>
       <button className="task-button" type="button" onClick={() => onChoose("completion")}>
         <FileSpreadsheet size={26} />
         <span>이수 서류 작성</span>
@@ -1146,6 +1298,268 @@ function TaskMenu({ onChoose }: { onChoose: (task: Exclude<ActiveTask, null>) =>
         <span>영수증 발급</span>
       </button>
     </section>
+  );
+}
+
+function SettingsStage({
+  busy,
+  form,
+  onBack,
+  onFormChange,
+  onSave,
+}: {
+  busy: boolean;
+  form: GoogleUrlForm;
+  onBack: () => void;
+  onFormChange: (value: GoogleUrlForm) => void;
+  onSave: () => void;
+}) {
+  return (
+    <section className="workflow-stage">
+      <button className="back-button" type="button" onClick={onBack} disabled={busy}>
+        <ArrowLeft size={16} />
+        메뉴로 돌아가기
+      </button>
+      <StepCard
+        icon={<Settings />}
+        title="기본 설정"
+        description="전체명단 주소와 작업 루트 폴더 주소를 저장합니다."
+      >
+        <GoogleUrlSettingsForm value={form} busy={busy} onChange={onFormChange} />
+        <button className="primary-action" type="button" onClick={onSave} disabled={busy}>
+          기본 설정 저장
+        </button>
+      </StepCard>
+    </section>
+  );
+}
+
+function PreliminaryDocumentStage({
+  busy,
+  form,
+  images,
+  documents,
+  downloadState,
+  assets,
+  onBack,
+  onFormChange,
+  onImagesChange,
+  onCreate,
+  onSaveDocuments,
+  onOpenLink,
+}: {
+  busy: boolean;
+  form: PreliminaryDocumentForm;
+  images: PreliminaryImageForm;
+  documents: GeneratedDocument[];
+  downloadState: PreliminaryDownloadState;
+  assets: PreliminaryGoogleAssetsState | null;
+  onBack: () => void;
+  onFormChange: (value: PreliminaryDocumentForm) => void;
+  onImagesChange: (value: PreliminaryImageForm) => void;
+  onCreate: () => void;
+  onSaveDocuments: () => void;
+  onOpenLink: (url: string) => void;
+}) {
+  return (
+    <section className="workflow-stage">
+      <button className="back-button" type="button" onClick={onBack} disabled={busy}>
+        <ArrowLeft size={16} />
+        메뉴로 돌아가기
+      </button>
+      <StepCard
+        icon={<FolderUp />}
+        title="사전 문서 작성"
+        description="사전 한글 문서와 Google 설문 자산을 한 번에 만듭니다."
+      >
+        <PreliminaryFormView
+          value={form}
+          images={images}
+          busy={busy}
+          onChange={onFormChange}
+          onImagesChange={onImagesChange}
+        />
+        <button
+          className="primary-action"
+          type="button"
+          onClick={onCreate}
+          disabled={busy || !isPreliminaryFormReady(form) || !isPreliminaryImageFormReady(images)}
+        >
+          사전 문서 만들기
+        </button>
+        <p className="muted">2. 수동생성자료는 템플릿 없이 별도 작성 대상입니다.</p>
+        {documents.length ? (
+          <section className="sub-panel">
+            <h3>한글 문서</h3>
+            <div className="document-actions">
+              <button
+                className={downloadState.status === "done" ? "download-action complete" : "download-action"}
+                type="button"
+                onClick={onSaveDocuments}
+                disabled={busy}
+              >
+                {downloadState.status === "done" ? <CheckCircle2 size={17} /> : <Download size={17} />}
+                {downloadState.status === "done" ? "다운로드 완료" : "한글 문서 4개 한 번에 저장"}
+              </button>
+            </div>
+            {downloadState.status === "done" ? (
+              <p className="muted">저장 위치: {downloadState.folderPath}</p>
+            ) : null}
+          </section>
+        ) : null}
+        {assets ? (
+          <section className="sub-panel">
+            <h3>Google 자산</h3>
+            {assets.items.map((item) => (
+              <div className="completion-links" key={item.formUrl}>
+                <strong>{item.label}</strong>
+                <button className="link-action" type="button" onClick={() => onOpenLink(item.folderUrl)}>
+                  생성 폴더 열기
+                </button>
+                <button className="link-action" type="button" onClick={() => onOpenLink(item.formUrl)}>
+                  설문 열기
+                </button>
+              </div>
+            ))}
+            <p className="muted">설문 본문의 연수명 등 문구는 생성된 설문에서 직접 수정하세요. 응답 시트는 Google Forms 응답 탭에서 수동으로 생성해 연결하세요.</p>
+          </section>
+        ) : null}
+      </StepCard>
+    </section>
+  );
+}
+
+function PreliminaryFormView({
+  value,
+  images,
+  busy,
+  onChange,
+  onImagesChange,
+}: {
+  value: PreliminaryDocumentForm;
+  images: PreliminaryImageForm;
+  busy: boolean;
+  onChange: (value: PreliminaryDocumentForm) => void;
+  onImagesChange: (value: PreliminaryImageForm) => void;
+}) {
+  const updateImage = (
+    trainingKey: keyof PreliminaryImageForm,
+    imageKey: keyof PreliminaryImageSet,
+    file: File | null,
+  ) => {
+    onImagesChange({
+      ...images,
+      [trainingKey]: {
+        ...images[trainingKey],
+        [imageKey]: file,
+      },
+    });
+  };
+
+  return (
+    <div className="preliminary-training-list">
+      <section className="preliminary-training-section">
+        <h3>연수 1</h3>
+        <div className="settings-form preliminary-training-grid">
+          <label>
+            <span>연수명</span>
+            <input
+              value={value.training1.trainingName}
+              onChange={(event) => onChange({ ...value, training1: { ...value.training1, trainingName: event.target.value } })}
+              disabled={busy}
+            />
+          </label>
+          <label>
+            <span>날짜</span>
+            <input
+              type="date"
+              value={value.training1.trainingDate}
+              onChange={(event) => onChange({ ...value, training1: { ...value.training1, trainingDate: event.target.value } })}
+              disabled={busy}
+            />
+          </label>
+          <label>
+            <span>강사명</span>
+            <input
+              value={value.training1.instructorName}
+              onChange={(event) => onChange({ ...value, training1: { ...value.training1, instructorName: event.target.value } })}
+              disabled={busy}
+            />
+          </label>
+          <label className="file-picker">
+            <span>강의설명 이미지</span>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(event) => updateImage("training1", "lectureDescription", event.target.files?.[0] ?? null)}
+              disabled={busy}
+            />
+            <strong>{images.training1.lectureDescription?.name ?? "선택된 파일 없음"}</strong>
+          </label>
+          <label className="file-picker">
+            <span>강사소개 이미지</span>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(event) => updateImage("training1", "instructorIntro", event.target.files?.[0] ?? null)}
+              disabled={busy}
+            />
+            <strong>{images.training1.instructorIntro?.name ?? "선택된 파일 없음"}</strong>
+          </label>
+        </div>
+      </section>
+
+      <section className="preliminary-training-section">
+        <h3>연수 2</h3>
+        <div className="settings-form preliminary-training-grid">
+          <label>
+            <span>연수명</span>
+            <input
+              value={value.training2.trainingName}
+              onChange={(event) => onChange({ ...value, training2: { ...value.training2, trainingName: event.target.value } })}
+              disabled={busy}
+            />
+          </label>
+          <label>
+            <span>날짜</span>
+            <input
+              type="date"
+              value={value.training2.trainingDate}
+              onChange={(event) => onChange({ ...value, training2: { ...value.training2, trainingDate: event.target.value } })}
+              disabled={busy}
+            />
+          </label>
+          <label>
+            <span>강사명</span>
+            <input
+              value={value.training2.instructorName}
+              onChange={(event) => onChange({ ...value, training2: { ...value.training2, instructorName: event.target.value } })}
+              disabled={busy}
+            />
+          </label>
+          <label className="file-picker">
+            <span>강의설명 이미지</span>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(event) => updateImage("training2", "lectureDescription", event.target.files?.[0] ?? null)}
+              disabled={busy}
+            />
+            <strong>{images.training2.lectureDescription?.name ?? "선택된 파일 없음"}</strong>
+          </label>
+          <label className="file-picker">
+            <span>강사소개 이미지</span>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(event) => updateImage("training2", "instructorIntro", event.target.files?.[0] ?? null)}
+              disabled={busy}
+            />
+            <strong>{images.training2.instructorIntro?.name ?? "선택된 파일 없음"}</strong>
+          </label>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1931,7 +2345,6 @@ function GeneratedDocumentLinks({
 
 function Progress({ current, configured }: { current: WorkflowStep; configured: boolean }) {
   const items: Array<{ id: WorkflowStep; label: string }> = [
-    { id: "settings", label: "기본 설정" },
     { id: "upload", label: "명단 불러오기" },
     { id: "review", label: "검토" },
     { id: "issue", label: "기록" },
@@ -1944,7 +2357,7 @@ function Progress({ current, configured }: { current: WorkflowStep; configured: 
           key={item.id}
           type="button"
           className={current === item.id ? "active" : ""}
-          disabled={item.id !== "settings" && !configured}
+          disabled={!configured}
         >
           {item.label}
         </button>
@@ -1974,7 +2387,7 @@ function GoogleUrlSettingsForm({
         />
       </label>
       <label>
-        <span>영수증 저장 폴더 주소</span>
+        <span>작업 루트 폴더 주소</span>
         <input
           value={value.driveFolderUrl}
           onChange={(event) => onChange({ ...value, driveFolderUrl: event.target.value })}
@@ -1995,7 +2408,7 @@ function CompletionSheetUrlForm({
   value: CompletionSheetForm;
   busy: boolean;
   onChange: (value: CompletionSheetForm) => void;
-  mode?: "completion-sheet" | "form-results";
+  mode?: "completion-sheet" | "form-results" | "receipt-sheet";
 }) {
   return (
     <div className="settings-form">
@@ -2030,9 +2443,22 @@ function CompletionSheetUrlForm({
           </label>
         </>
       ) : null}
+      {mode === "receipt-sheet" ? (
+        <label>
+          <span>영수증 연수기간 날짜</span>
+          <input
+            type="date"
+            value={value.trainingDate}
+            onChange={(event) => onChange({ ...value, trainingDate: event.target.value })}
+            disabled={busy}
+          />
+        </label>
+      ) : null}
       <p className="muted">
         {mode === "form-results"
           ? "설문 결과의 C열부터 K열까지를 복사해 같은 폴더에 이수 처리용 Google Sheet를 만듭니다."
+          : mode === "receipt-sheet"
+            ? "영수증은 기본 설정의 작업 루트 폴더 아래 영수증 폴더를 만들고, 그 안의 날짜 폴더에 저장됩니다."
           : "주소에 특정 탭 정보가 있으면 해당 탭을, 없으면 첫 번째 탭을 읽습니다."}
       </p>
     </div>
@@ -2222,10 +2648,79 @@ function ResultTable({ results }: { results: ReturnType<typeof matchRecipients> 
   );
 }
 
+function isPreliminaryFormReady(form: PreliminaryDocumentForm): boolean {
+  return Boolean(
+    form.training1.trainingName.trim()
+      && form.training1.trainingDate.trim()
+      && form.training1.instructorName.trim()
+      && form.training2.trainingName.trim()
+      && form.training2.trainingDate.trim()
+      && form.training2.instructorName.trim(),
+  );
+}
+
+function isPreliminaryImageFormReady(images: PreliminaryImageForm): boolean {
+  return Boolean(
+    images.training1.lectureDescription
+      && images.training1.instructorIntro
+      && images.training2.lectureDescription
+      && images.training2.instructorIntro,
+  );
+}
+
+function validatePreliminaryForm(form: PreliminaryDocumentForm) {
+  if (!isPreliminaryFormReady(form)) {
+    throw new Error("연수명 2개, 연수 날짜 2개, 강사명 2개를 모두 입력하세요.");
+  }
+  parseTrainingDate(form.training1.trainingDate);
+  parseTrainingDate(form.training2.trainingDate);
+}
+
+function validatePreliminaryImages(images: PreliminaryImageForm) {
+  if (!isPreliminaryImageFormReady(images)) {
+    throw new Error("연수 1과 연수 2의 강의설명 이미지, 강사소개 이미지를 모두 첨부하세요.");
+  }
+  [
+    images.training1.lectureDescription,
+    images.training1.instructorIntro,
+    images.training2.lectureDescription,
+    images.training2.instructorIntro,
+  ].forEach((file) => {
+    if (!file?.type.startsWith("image/")) {
+      throw new Error("설문에 첨부할 파일은 이미지 형식이어야 합니다.");
+    }
+  });
+}
+
+async function buildPreliminaryFormImages(images: PreliminaryImageSet) {
+  if (!images.lectureDescription || !images.instructorIntro) {
+    throw new Error("강의설명 이미지와 강사소개 이미지를 모두 첨부하세요.");
+  }
+  return [
+    await buildPreliminaryFormImage(images.lectureDescription, "강의설명 이미지"),
+    await buildPreliminaryFormImage(images.instructorIntro, "강사소개 이미지"),
+  ];
+}
+
+async function buildPreliminaryFormImage(file: File, altText: string) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return {
+    filename: file.name,
+    mimeType: file.type || "application/octet-stream",
+    bytes: Array.from(bytes),
+    altText,
+  };
+}
+
 function buildCompletionSheetRowsFromFormResults(rawRows: unknown[][], trainingName: string): string[][] {
   const rows = rawRows
     .slice(1)
-    .map((row) => row.slice(2, 11).map((cell) => String(cell ?? "").trim()))
+    .map((row) => row.slice(2, 11).map((cell, index) => {
+      const value = String(cell ?? "").trim();
+      if (index === 1) return formatBirthDateForCompletionSheet(value);
+      if (index === 2) return formatPhoneForCompletionSheet(value);
+      return value;
+    }))
     .filter((cells) => cells.some(Boolean));
 
   return [
@@ -2241,8 +2736,31 @@ function buildCompletionSheetRowsFromFormResults(rawRows: unknown[][], trainingN
   ];
 }
 
+function formatBirthDateForCompletionSheet(value: string): string {
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return value;
+  if (digits.length <= 6) return digits.padStart(6, "0");
+  return digits;
+}
+
+function formatPhoneForCompletionSheet(value: string): string {
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return value;
+  if (digits.length === 11) return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
+  if (digits.length === 10) return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return value;
+}
+
 function buildResultSheetTitle(trainingDate: string): string {
   return `(결과)${formatMonthDay(trainingDate)}직무연수`;
+}
+
+function buildReceiptTrainingPeriod(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+  if (!match) return trimmed;
+  const formatted = `${match[1]}.${match[2].padStart(2, "0")}.${match[3].padStart(2, "0")}`;
+  return `${formatted} ~ ${formatted}`;
 }
 
 function formatMonthDay(value: string): string {
@@ -2355,7 +2873,7 @@ function extractDriveFolderId(value: string): string {
   const queryMatch = trimmed.match(/[?&]id=([a-zA-Z0-9-_]+)/);
   if (queryMatch?.[1]) return queryMatch[1];
   if (/^[a-zA-Z0-9-_]{20,}$/.test(trimmed)) return trimmed;
-  throw new Error("영수증 저장 폴더 주소를 확인하지 못했습니다. 구글 드라이브 폴더 주소를 다시 확인하세요.");
+  throw new Error("작업 루트 폴더 주소를 확인하지 못했습니다. 구글 드라이브 폴더 주소를 다시 확인하세요.");
 }
 
 function buildGoogleSheetUrl(spreadsheetId: string): string {

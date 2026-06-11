@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default desktop capability set","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-save","fs:default","fs:allow-write-file",{"identifier":"fs:scope","allow":[{"path":"**"}]}]}}
+{"default":{"identifier":"default","description":"Default desktop capability set","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","dialog:allow-save","fs:default","fs:allow-write-file",{"identifier":"fs:scope","allow":[{"path":"**"}]}]}}

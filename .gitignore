@@ -11,6 +11,7 @@ yarn.lock
 *.log
 output/
 receipts/
+debug-output/
 *.pdf.tmp
 token.json
 credentials.json

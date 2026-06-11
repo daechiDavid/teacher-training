@@ -19,9 +19,12 @@ const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
 const GOOGLE_DRIVE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/drive/v3/files";
+const GOOGLE_FORMS_URL: &str = "https://forms.googleapis.com/v1/forms";
 const GOOGLE_SHEETS_URL: &str = "https://sheets.googleapis.com/v4/spreadsheets";
+const GOOGLE_SLIDES_URL: &str = "https://slides.googleapis.com/v1/presentations";
+const RECEIPT_TEMPLATE_PRESENTATION_ID: &str = "1ZxC_zC_fZXKGqDZwzLpIKMqVasLLzdMBLzRAekn1e1w";
 const GOOGLE_SCOPES: &str =
-    "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/spreadsheets";
+    "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/forms.body https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations";
 
 #[derive(Debug, Serialize)]
 struct AppStatus {
@@ -104,8 +107,7 @@ struct SaveGoogleConfigRequest {
 
 #[derive(Debug, Deserialize)]
 struct CreateDriveFolderRequest {
-    training_name: String,
-    issued_date: String,
+    training_date: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +124,13 @@ struct UploadPdfRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct GenerateReceiptPdfRequest {
+    name: String,
+    training_name: String,
+    training_period: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateSheetFromSourceFolderRequest {
     source_spreadsheet_id: String,
     title: String,
@@ -133,6 +142,31 @@ struct CreatedSheetResult {
     spreadsheet_id: String,
     sheet_name: String,
     web_view_link: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePreliminaryGoogleAssetsRequest {
+    root_folder_id: String,
+    folder_name: String,
+    form_template_id: String,
+    form_title: String,
+    images: Vec<PreliminaryFormImage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreliminaryFormImage {
+    filename: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+    alt_text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PreliminaryGoogleAssetsResult {
+    folder_id: String,
+    folder_name: String,
+    form_id: String,
+    form_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +187,11 @@ struct UploadedFileResult {
     id: String,
     name: String,
     web_view_link: String,
+}
+
+struct FormImageSource {
+    source_uri: String,
+    alt_text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +405,10 @@ fn read_sheet_values_with_token(
     let response = Client::new()
         .get(url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("valueRenderOption", "FORMATTED_VALUE"),
+            ("dateTimeRenderOption", "FORMATTED_STRING"),
+        ])
         .send()
         .map_err(|error| error.to_string())?;
 
@@ -457,6 +500,119 @@ fn google_create_sheet_from_source_folder(
         sheet_name,
         web_view_link: created.web_view_link,
     })
+}
+
+#[tauri::command]
+fn google_create_preliminary_assets(
+    app: AppHandle,
+    request: CreatePreliminaryGoogleAssetsRequest,
+) -> Result<PreliminaryGoogleAssetsResult, String> {
+    let config = resolve_google_oauth_config(&app)?;
+    let token = valid_access_token(&app, &config)?;
+    let root_folder_id = request.root_folder_id.trim();
+    let folder_name = safe_drive_name(request.folder_name.trim());
+    let form_template_id = request.form_template_id.trim();
+    let form_title = request.form_title.trim();
+    if root_folder_id.is_empty()
+        || folder_name.is_empty()
+        || form_template_id.is_empty()
+        || form_title.is_empty()
+    {
+        return Err("루트 폴더, 날짜 폴더명, 설문 템플릿, 설문 제목은 필수입니다.".to_string());
+    }
+
+    let folder = drive_find_or_create_folder_with_parent(&token, root_folder_id, &folder_name)?;
+    let copied_form = drive_copy_file(&token, form_template_id, &folder.id, form_title)?;
+    let uploaded_images = request
+        .images
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let fallback_name = format!("form-image-{}.png", index + 1);
+            let filename = safe_drive_name(if image.filename.trim().is_empty() {
+                &fallback_name
+            } else {
+                image.filename.trim()
+            });
+            let uploaded = drive_upload_binary_file(
+                &token,
+                &folder.id,
+                &filename,
+                image.mime_type.trim(),
+                image.bytes,
+            )?;
+            Ok((uploaded.id, image.alt_text))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let form_images = uploaded_images
+        .iter()
+        .map(|(file_id, alt_text)| FormImageSource {
+            source_uri: drive_direct_download_url(file_id),
+            alt_text: alt_text.to_string(),
+        })
+        .collect::<Vec<_>>();
+    forms_insert_images(&token, &copied_form.id, &form_images)?;
+    for (file_id, _) in uploaded_images {
+        drive_delete_file(&token, &file_id)?;
+    }
+
+    Ok(PreliminaryGoogleAssetsResult {
+        folder_id: folder.id,
+        folder_name: folder.name,
+        form_id: copied_form.id,
+        form_url: copied_form.web_view_link,
+    })
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = Url::parse(url.trim()).map_err(|_| "열 수 없는 링크 형식입니다.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("http 또는 https 링크만 열 수 있습니다.".to_string());
+    }
+    open_url(parsed.as_str())
+}
+
+#[tauri::command]
+fn generate_receipt_pdf_from_pptx(
+    app: AppHandle,
+    request: GenerateReceiptPdfRequest,
+) -> Result<Vec<u8>, String> {
+    if request.name.trim().is_empty()
+        || request.training_name.trim().is_empty()
+        || request.training_period.trim().is_empty()
+    {
+        return Err("영수증 생성에는 성명, 연수명, 연수기간이 모두 필요합니다.".to_string());
+    }
+    let config = resolve_google_config(&app)?;
+    let token = valid_access_token(&app, &config)?;
+    let title = safe_drive_name(&format!(
+        "receipt-render-{}-{}",
+        request.name.trim(),
+        Uuid::new_v4()
+    ));
+    let presentation = drive_copy_file(
+        &token,
+        RECEIPT_TEMPLATE_PRESENTATION_ID,
+        &config.drive_parent_folder_id,
+        &title,
+    )?;
+    let result = (|| {
+        slides_replace_receipt_tokens(
+            &token,
+            &presentation.id,
+            request.name.trim(),
+            request.training_name.trim(),
+            request.training_period.trim(),
+        )?;
+        drive_export_pdf(&token, &presentation.id)
+    })();
+    let delete_result = drive_delete_file(&token, &presentation.id);
+    match (result, delete_result) {
+        (Ok(bytes), Ok(())) => Ok(bytes),
+        (Ok(bytes), Err(_)) => Ok(bytes),
+        (Err(error), _) => Err(error),
+    }
 }
 
 fn batch_update_sheet_values(
@@ -562,25 +718,171 @@ fn drive_create_google_sheet(
     })
 }
 
-#[tauri::command]
-fn drive_create_training_folder(
-    app: AppHandle,
-    request: CreateDriveFolderRequest,
+fn drive_upload_binary_file(
+    token: &str,
+    parent_folder_id: &str,
+    filename: &str,
+    mime_type: &str,
+    bytes: Vec<u8>,
+) -> Result<UploadedFileResult, String> {
+    if bytes.is_empty() {
+        return Err(format!("{filename} 파일이 비어 있습니다."));
+    }
+    let resolved_mime_type = if mime_type.trim().is_empty() {
+        "application/octet-stream"
+    } else {
+        mime_type.trim()
+    };
+    let metadata = serde_json::json!({
+        "name": filename,
+        "parents": [parent_folder_id],
+        "mimeType": resolved_mime_type,
+    })
+    .to_string();
+    let form = multipart::Form::new()
+        .part(
+            "metadata",
+            multipart::Part::text(metadata)
+                .mime_str("application/json; charset=UTF-8")
+                .map_err(|error| error.to_string())?,
+        )
+        .part(
+            "file",
+            multipart::Part::bytes(bytes)
+                .file_name(filename.to_string())
+                .mime_str(resolved_mime_type)
+                .map_err(|error| error.to_string())?,
+        );
+
+    let response = Client::new()
+        .post(GOOGLE_DRIVE_UPLOAD_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("uploadType", "multipart"),
+            ("fields", "id,name,webViewLink"),
+        ])
+        .multipart(form)
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format_google_error(response));
+    }
+
+    let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    let file_id = body
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    if file_id.trim().is_empty() {
+        return Err("Google Drive 이미지 업로드 응답에 파일 ID가 없습니다.".to_string());
+    }
+    share_drive_file(token, &file_id)?;
+    Ok(UploadedFileResult {
+        id: file_id,
+        name: body
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+        web_view_link: body
+            .get("webViewLink")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn slides_replace_receipt_tokens(
+    token: &str,
+    presentation_id: &str,
+    name: &str,
+    training_name: &str,
+    training_period: &str,
+) -> Result<(), String> {
+    let requests = [
+        ("{{성명}}", name),
+        ("{{연수명}}", training_name),
+        ("{{연수기간}}", training_period),
+    ]
+    .into_iter()
+    .map(|(contains_text, replace_text)| {
+        serde_json::json!({
+            "replaceAllText": {
+                "containsText": {
+                    "text": contains_text,
+                    "matchCase": true,
+                },
+                "replaceText": replace_text,
+            },
+        })
+    })
+    .collect::<Vec<_>>();
+
+    let response = Client::new()
+        .post(format!("{GOOGLE_SLIDES_URL}/{presentation_id}:batchUpdate"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({ "requests": requests }))
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format_google_error(response))
+    }
+}
+
+fn drive_export_pdf(token: &str, file_id: &str) -> Result<Vec<u8>, String> {
+    let response = Client::new()
+        .get(format!("{GOOGLE_DRIVE_FILES_URL}/{file_id}/export"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[("mimeType", "application/pdf")])
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format_google_error(response));
+    }
+    response.bytes().map(|bytes| bytes.to_vec()).map_err(|error| error.to_string())
+}
+
+fn drive_direct_download_url(file_id: &str) -> String {
+    format!("https://drive.google.com/uc?export=view&id={file_id}")
+}
+
+fn drive_delete_file(token: &str, file_id: &str) -> Result<(), String> {
+    let response = Client::new()
+        .delete(format!("{GOOGLE_DRIVE_FILES_URL}/{file_id}"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[("supportsAllDrives", "true")])
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format_google_error(response))
+    }
+}
+
+fn drive_create_folder_with_parent(
+    token: &str,
+    parent_folder_id: &str,
+    folder_name: &str,
 ) -> Result<DriveFolderResult, String> {
-    let config = resolve_google_config(&app)?;
-    let token = valid_access_token(&app, &config)?;
-    let folder_name = safe_drive_name(&format!(
-        "{}_{}",
-        request.training_name, request.issued_date
-    ));
     let response = Client::new()
         .post(GOOGLE_DRIVE_FILES_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .query(&[("fields", "id,name")])
+        .query(&[
+            ("fields", "id,name"),
+            ("supportsAllDrives", "true"),
+        ])
         .json(&serde_json::json!({
             "name": folder_name,
             "mimeType": "application/vnd.google-apps.folder",
-            "parents": [config.drive_parent_folder_id],
+            "parents": [parent_folder_id],
         }))
         .send()
         .map_err(|error| error.to_string())?;
@@ -606,6 +908,172 @@ fn drive_create_training_folder(
             .unwrap_or("")
             .to_string(),
     })
+}
+
+fn drive_find_or_create_folder_with_parent(
+    token: &str,
+    parent_folder_id: &str,
+    folder_name: &str,
+) -> Result<DriveFolderResult, String> {
+    if let Some(folder) = drive_find_folder_with_parent(token, parent_folder_id, folder_name)? {
+        return Ok(folder);
+    }
+    drive_create_folder_with_parent(token, parent_folder_id, folder_name)
+}
+
+fn drive_find_folder_with_parent(
+    token: &str,
+    parent_folder_id: &str,
+    folder_name: &str,
+) -> Result<Option<DriveFolderResult>, String> {
+    let escaped_name = folder_name.replace('\\', "\\\\").replace('\'', "\\'");
+    let escaped_parent = parent_folder_id.replace('\\', "\\\\").replace('\'', "\\'");
+    let query = format!(
+        "mimeType = 'application/vnd.google-apps.folder' and name = '{escaped_name}' and '{escaped_parent}' in parents and trashed = false"
+    );
+    let response = Client::new()
+        .get(GOOGLE_DRIVE_FILES_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("q", query.as_str()),
+            ("fields", "files(id,name)"),
+            ("supportsAllDrives", "true"),
+            ("includeItemsFromAllDrives", "true"),
+        ])
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format_google_error(response));
+    }
+
+    let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    Ok(body
+        .get("files")
+        .and_then(|value| value.as_array())
+        .and_then(|files| files.first())
+        .and_then(|file| {
+            Some(DriveFolderResult {
+                id: file.get("id")?.as_str()?.to_string(),
+                name: file.get("name")?.as_str()?.to_string(),
+            })
+        }))
+}
+
+fn drive_copy_file(
+    token: &str,
+    source_file_id: &str,
+    parent_folder_id: &str,
+    name: &str,
+) -> Result<UploadedFileResult, String> {
+    let response = Client::new()
+        .post(format!("{GOOGLE_DRIVE_FILES_URL}/{source_file_id}/copy"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("fields", "id,name,webViewLink"),
+            ("supportsAllDrives", "true"),
+        ])
+        .json(&serde_json::json!({
+            "name": name,
+            "parents": [parent_folder_id],
+        }))
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format_google_error(response));
+    }
+
+    let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    let id = body
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    if id.trim().is_empty() {
+        return Err("Google Drive 파일 복사 응답에 파일 ID가 없습니다.".to_string());
+    }
+    Ok(UploadedFileResult {
+        id,
+        name: body
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+        web_view_link: body
+            .get("webViewLink")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn forms_insert_images(
+    token: &str,
+    form_id: &str,
+    images: &[FormImageSource],
+) -> Result<(), String> {
+    let requests = images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            serde_json::json!({
+                "createItem": {
+                    "item": {
+                        "imageItem": {
+                            "image": {
+                                "sourceUri": image.source_uri,
+                                "altText": image.alt_text,
+                            },
+                        },
+                    },
+                    "location": { "index": index },
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    forms_batch_update(token, form_id, requests)
+}
+
+fn forms_batch_update(
+    token: &str,
+    form_id: &str,
+    requests: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let response = Client::new()
+        .post(format!("{GOOGLE_FORMS_URL}/{form_id}:batchUpdate"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "requests": requests,
+        }))
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format_google_error(response))
+    }
+}
+
+#[tauri::command]
+fn drive_create_training_folder(
+    app: AppHandle,
+    request: CreateDriveFolderRequest,
+) -> Result<DriveFolderResult, String> {
+    let config = resolve_google_config(&app)?;
+    let token = valid_access_token(&app, &config)?;
+    let receipt_root = drive_find_or_create_folder_with_parent(
+        &token,
+        &config.drive_parent_folder_id,
+        "영수증",
+    )?;
+    let date_folder_name = safe_drive_name(&folder_name_from_training_date(&request.training_date)?);
+    drive_find_or_create_folder_with_parent(&token, &receipt_root.id, &date_folder_name)
 }
 
 #[tauri::command]
@@ -698,6 +1166,9 @@ pub fn run() {
             google_batch_update_sheet,
             google_batch_update_any_sheet,
             google_create_sheet_from_source_folder,
+            google_create_preliminary_assets,
+            open_external_url,
+            generate_receipt_pdf_from_pptx,
             drive_create_training_folder,
             drive_upload_pdf
         ])
@@ -1101,6 +1572,57 @@ fn column_label(column_number: usize) -> String {
         value /= 26;
     }
     label
+}
+
+fn folder_name_from_training_date(value: &str) -> Result<String, String> {
+    let parts = value
+        .trim()
+        .split(['-', '.', '/'])
+        .collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err("영수증 저장을 위해 연수 날짜를 YYYY-MM-DD 형식으로 입력하세요.".to_string());
+    }
+    let year = parts[0]
+        .parse::<i32>()
+        .map_err(|_| "연수 날짜의 연도를 확인하세요.".to_string())?;
+    let month = parts[1]
+        .parse::<u32>()
+        .map_err(|_| "연수 날짜의 월을 확인하세요.".to_string())?;
+    let day = parts[2]
+        .parse::<u32>()
+        .map_err(|_| "연수 날짜의 일을 확인하세요.".to_string())?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err("연수 날짜가 올바르지 않습니다.".to_string());
+    }
+    let dow = korean_day_of_week(year, month, day)?;
+    Ok(format!(
+        "{:02}.{:02}.{:02}.({dow})",
+        year.rem_euclid(100),
+        month,
+        day
+    ))
+}
+
+fn korean_day_of_week(year: i32, month: u32, day: u32) -> Result<&'static str, String> {
+    let (mut y, mut m) = (year, month as i32);
+    if m < 3 {
+        y -= 1;
+        m += 12;
+    }
+    let k = y % 100;
+    let j = y / 100;
+    let h = (day as i32 + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) + (5 * j)).rem_euclid(7);
+    let index = match h {
+        0 => 6,
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        6 => 5,
+        _ => return Err("요일을 계산하지 못했습니다.".to_string()),
+    };
+    Ok(["일", "월", "화", "수", "목", "금", "토"][index])
 }
 
 fn resolve_sheet_title(

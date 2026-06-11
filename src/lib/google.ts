@@ -111,14 +111,50 @@ export async function createGoogleSheetFromSourceFolder(
   });
 }
 
-export async function createDriveTrainingFolder(trainingName: string, issuedDate: string): Promise<{
+export async function createPreliminaryGoogleAssets(request: {
+  rootFolderId: string;
+  folderName: string;
+  formTemplateId: string;
+  formTitle: string;
+  images: Array<{
+    filename: string;
+    mimeType: string;
+    bytes: number[];
+    altText: string;
+  }>;
+}): Promise<{
+  folder_id: string;
+  folder_name: string;
+  form_id: string;
+  form_url: string;
+}> {
+  return invoke("google_create_preliminary_assets", {
+    request: {
+      root_folder_id: request.rootFolderId,
+      folder_name: request.folderName,
+      form_template_id: request.formTemplateId,
+      form_title: request.formTitle,
+      images: request.images.map((image) => ({
+        filename: image.filename,
+        mime_type: image.mimeType,
+        bytes: image.bytes,
+        alt_text: image.altText,
+      })),
+    },
+  });
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  await invoke("open_external_url", { url });
+}
+
+export async function createDriveTrainingFolder(trainingDate: string): Promise<{
   id: string;
   name: string;
 }> {
   return invoke("drive_create_training_folder", {
     request: {
-      training_name: trainingName,
-      issued_date: issuedDate,
+      training_date: trainingDate,
     },
   });
 }
