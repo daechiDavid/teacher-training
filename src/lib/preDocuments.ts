@@ -85,6 +85,11 @@ export function buildConsentFormTitle(trainingDate: string): string {
   return `${date.month}월 ${date.day}일(${date.dow}) 쌍방향 ZOOM 원격직무연수 동의서`;
 }
 
+export function buildEvaluationFormTitle(trainingDate: string): string {
+  const date = parseTrainingDate(trainingDate);
+  return `화상원격연수 평가서(${date.month}.${date.day}.)`;
+}
+
 export function parseTrainingDate(value: string): {
   year: string;
   shortYear: string;

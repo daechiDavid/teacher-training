@@ -79,6 +79,7 @@ import {
 import { generateReceiptPdf, todayLocalDate } from "../lib/receipt";
 import {
   buildConsentFormTitle,
+  buildEvaluationFormTitle,
   buildPreliminaryFolderName,
   createPreliminaryDocuments,
   parseTrainingDate,
@@ -176,6 +177,7 @@ type PreliminaryGoogleAssetsState = {
     label: string;
     folderUrl: string;
     formUrl: string;
+    evaluationFormUrl: string;
   }>;
 };
 
@@ -440,12 +442,15 @@ export function App() {
       const trainingImageInputs = [preliminaryImages.training1, preliminaryImages.training2];
       const assetsByTraining = await Promise.all([preliminaryForm.training1, preliminaryForm.training2].map(async (training, index) => {
         const formTitle = buildConsentFormTitle(training.trainingDate);
+        const evaluationFormTitle = buildEvaluationFormTitle(training.trainingDate);
         const images = await buildPreliminaryFormImages(trainingImageInputs[index]);
         return createPreliminaryGoogleAssets({
           rootFolderId: googleStatus.drive_parent_folder_id,
           folderName: buildPreliminaryFolderName(training.trainingDate),
           formTemplateId: "1Hz1l6bF2ikqp0It9FSx3m0OgwdaIZxQBzYsl3lS0QHo",
           formTitle,
+          evaluationFormTemplateId: "14ygBdjHn5U7KBi3dFhXikcsbu-cckJNdtKeOmz5oQR8",
+          evaluationFormTitle,
           images,
         });
       }));
@@ -455,6 +460,7 @@ export function App() {
           label: `${index + 1}. ${index === 0 ? preliminaryForm.training1.trainingName : preliminaryForm.training2.trainingName}`,
           folderUrl: buildDriveFolderUrl(assets.folder_id),
           formUrl: assets.form_url,
+          evaluationFormUrl: assets.evaluation_form_url,
         })),
       });
       setNotice("사전 문서와 Google 설문 자산을 만들었습니다.");
@@ -1417,7 +1423,10 @@ function PreliminaryDocumentStage({
                   생성 폴더 열기
                 </button>
                 <button className="link-action" type="button" onClick={() => onOpenLink(item.formUrl)}>
-                  설문 열기
+                  동의서 설문 열기
+                </button>
+                <button className="link-action" type="button" onClick={() => onOpenLink(item.evaluationFormUrl)}>
+                  평가서 설문 열기
                 </button>
               </div>
             ))}
@@ -2413,7 +2422,13 @@ function CompletionSheetUrlForm({
   return (
     <div className="settings-form">
       <label>
-        <span>{mode === "form-results" ? "설문 결과 주소" : "연수 신청자 명단 주소"}</span>
+        <span>
+          {mode === "form-results"
+            ? "설문 결과 주소"
+            : mode === "receipt-sheet"
+              ? "이수 결과 주소"
+              : "연수 신청자 명단 주소"}
+        </span>
         <input
           value={value.spreadsheetUrl}
           onChange={(event) => onChange({ ...value, spreadsheetUrl: event.target.value })}
@@ -2458,7 +2473,7 @@ function CompletionSheetUrlForm({
         {mode === "form-results"
           ? "설문 결과의 C열부터 K열까지를 복사해 같은 폴더에 이수 처리용 Google Sheet를 만듭니다."
           : mode === "receipt-sheet"
-            ? "영수증은 기본 설정의 작업 루트 폴더 아래 영수증 폴더를 만들고, 그 안의 날짜 폴더에 저장됩니다."
+            ? "영수증은 기본 설정의 작업 루트 폴더 아래 이수증&영수증 폴더를 만들고, 그 안의 날짜 폴더 아래 영수증 폴더에 저장됩니다."
           : "주소에 특정 탭 정보가 있으면 해당 탭을, 없으면 첫 번째 탭을 읽습니다."}
       </p>
     </div>

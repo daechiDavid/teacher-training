@@ -116,6 +116,8 @@ export async function createPreliminaryGoogleAssets(request: {
   folderName: string;
   formTemplateId: string;
   formTitle: string;
+  evaluationFormTemplateId: string;
+  evaluationFormTitle: string;
   images: Array<{
     filename: string;
     mimeType: string;
@@ -127,6 +129,8 @@ export async function createPreliminaryGoogleAssets(request: {
   folder_name: string;
   form_id: string;
   form_url: string;
+  evaluation_form_id: string;
+  evaluation_form_url: string;
 }> {
   return invoke("google_create_preliminary_assets", {
     request: {
@@ -134,6 +138,8 @@ export async function createPreliminaryGoogleAssets(request: {
       folder_name: request.folderName,
       form_template_id: request.formTemplateId,
       form_title: request.formTitle,
+      evaluation_form_template_id: request.evaluationFormTemplateId,
+      evaluation_form_title: request.evaluationFormTitle,
       images: request.images.map((image) => ({
         filename: image.filename,
         mime_type: image.mimeType,

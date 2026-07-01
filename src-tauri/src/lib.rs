@@ -150,6 +150,8 @@ struct CreatePreliminaryGoogleAssetsRequest {
     folder_name: String,
     form_template_id: String,
     form_title: String,
+    evaluation_form_template_id: String,
+    evaluation_form_title: String,
     images: Vec<PreliminaryFormImage>,
 }
 
@@ -167,6 +169,8 @@ struct PreliminaryGoogleAssetsResult {
     folder_name: String,
     form_id: String,
     form_url: String,
+    evaluation_form_id: String,
+    evaluation_form_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -513,16 +517,26 @@ fn google_create_preliminary_assets(
     let folder_name = safe_drive_name(request.folder_name.trim());
     let form_template_id = request.form_template_id.trim();
     let form_title = request.form_title.trim();
+    let evaluation_form_template_id = request.evaluation_form_template_id.trim();
+    let evaluation_form_title = request.evaluation_form_title.trim();
     if root_folder_id.is_empty()
         || folder_name.is_empty()
         || form_template_id.is_empty()
         || form_title.is_empty()
+        || evaluation_form_template_id.is_empty()
+        || evaluation_form_title.is_empty()
     {
-        return Err("루트 폴더, 날짜 폴더명, 설문 템플릿, 설문 제목은 필수입니다.".to_string());
+        return Err("루트 폴더, 날짜 폴더명, 설문 템플릿, 설문 제목, 평가서 템플릿, 평가서 제목은 필수입니다.".to_string());
     }
 
     let folder = drive_find_or_create_folder_with_parent(&token, root_folder_id, &folder_name)?;
     let copied_form = drive_copy_file(&token, form_template_id, &folder.id, form_title)?;
+    let copied_evaluation_form = drive_copy_file(
+        &token,
+        evaluation_form_template_id,
+        &folder.id,
+        evaluation_form_title,
+    )?;
     let uploaded_images = request
         .images
         .into_iter()
@@ -561,6 +575,8 @@ fn google_create_preliminary_assets(
         folder_name: folder.name,
         form_id: copied_form.id,
         form_url: copied_form.web_view_link,
+        evaluation_form_id: copied_evaluation_form.id,
+        evaluation_form_url: copied_evaluation_form.web_view_link,
     })
 }
 
@@ -1070,10 +1086,12 @@ fn drive_create_training_folder(
     let receipt_root = drive_find_or_create_folder_with_parent(
         &token,
         &config.drive_parent_folder_id,
-        "영수증",
+        "이수증&영수증",
     )?;
     let date_folder_name = safe_drive_name(&folder_name_from_training_date(&request.training_date)?);
-    drive_find_or_create_folder_with_parent(&token, &receipt_root.id, &date_folder_name)
+    let date_folder =
+        drive_find_or_create_folder_with_parent(&token, &receipt_root.id, &date_folder_name)?;
+    drive_find_or_create_folder_with_parent(&token, &date_folder.id, "영수증")
 }
 
 #[tauri::command]
