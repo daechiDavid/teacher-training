@@ -45,9 +45,16 @@ export function parseCompletionWorkbookRows(rawRows: unknown[][]): ParsedSheet<C
 
 export function parseRosterWorkbookRows(rawRows: unknown[][]): ParsedSheet<RosterRow> {
   const headers = rawRows[0]?.map((value) => String(value ?? "").trim()) ?? [];
+  const fixedRows = mapRowsByHeaders(ROSTER_HEADERS, rawRows) as RosterRow[];
   return {
     headers,
-    rows: mapRowsByHeaders(ROSTER_HEADERS, rawRows) as RosterRow[],
+    rows: fixedRows.map((row, index) => ({
+      ...row,
+      __trainingRecords: headers.slice(12).map((header, offset) => ({
+        header,
+        value: String(rawRows[index + 1]?.[offset + 12] ?? "").trim(),
+      })),
+    })),
     missingHeaders: findMissingHeaders(headers, ROSTER_HEADERS),
   };
 }

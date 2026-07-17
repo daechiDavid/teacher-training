@@ -84,7 +84,7 @@ export function buildCompletionDocumentRows(
     completionNumber: "",
     name: row.name,
     birthDate: row.birthDate,
-    schoolName: buildSchoolName(row.region, row.school),
+    schoolName: normalizeText(row.school),
     schoolLevel: row.schoolLevel.slice(0, 2),
     trainingClassCode: "",
     certificateNumber: "",
@@ -102,15 +102,6 @@ export function buildCompletionDocumentFilename(form: CompletionDocumentForm): s
 
 function compactDate(value: string): string {
   return normalizeText(value).replace(/\D/g, "").slice(0, 8);
-}
-
-function buildSchoolName(region: string, school: string): string {
-  const cleanRegion = normalizeText(region);
-  const cleanSchool = normalizeText(school);
-  if (!cleanRegion) return cleanSchool;
-  if (!cleanSchool) return cleanRegion;
-  if (cleanSchool.slice(0, cleanRegion.length) === cleanRegion) return cleanSchool;
-  return `${cleanRegion} ${cleanSchool}`;
 }
 
 export async function createCompletionDocumentWorkbook(rows: CompletionDocumentRow[]): Promise<Blob> {

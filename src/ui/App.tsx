@@ -15,8 +15,10 @@ import { writeFile } from "@tauri-apps/plugin-fs";
 import { useEffect, useMemo, useState } from "react";
 import {
   matchRecipients,
+  normalizePhone,
   normalizeApplicantRows,
   normalizeCompletionRows,
+  normalizeText,
   personKey,
   normalizeRosterRows,
   COMPLETION_HEADERS,
@@ -31,6 +33,12 @@ import {
   CompletionDocumentRow,
   getTrainingNameOptions,
 } from "../lib/completionDocument";
+import {
+  buildCashReceiptFilename,
+  buildCashReceiptTrainings,
+  CashReceiptTraining,
+  createCashReceiptWorkbook,
+} from "../lib/cashReceipt";
 import {
   AttendanceBaseForm,
   AttendancePerson,
@@ -94,7 +102,7 @@ type LoadedFileState = {
 
 type WorkflowStep = "upload" | "review" | "issue";
 type DocumentWorkflowStep = "source" | "doc1" | "doc2" | "doc3" | "doc5" | "doc7" | "done";
-type ActiveTask = "settings" | "preliminary" | "completion" | "receipt" | null;
+type ActiveTask = "settings" | "preliminary" | "completion" | "receipt" | "cashReceipt" | null;
 
 type GoogleUrlForm = {
   spreadsheetUrl: string;
@@ -225,6 +233,8 @@ export function App() {
   const [completionRows, setCompletionRows] = useState<ReturnType<typeof normalizeCompletionRows>>([]);
   const [rosterRows, setRosterRows] = useState<ReturnType<typeof normalizeRosterRows>>([]);
   const [rosterHeaders, setRosterHeaders] = useState<string[]>([]);
+  const [cashReceiptFile, setCashReceiptFile] = useState<LoadedFileState | null>(null);
+  const [cashReceiptTrainings, setCashReceiptTrainings] = useState<CashReceiptTraining[]>([]);
   const [documentSourceFile, setDocumentSourceFile] = useState<LoadedFileState | null>(null);
   const [documentRows, setDocumentRows] = useState<ReturnType<typeof normalizeApplicantRows>>([]);
   const [documentSheetSource, setDocumentSheetSource] = useState<DocumentSheetSource | null>(null);
@@ -486,16 +496,22 @@ export function App() {
         rawRows,
         completionSheetForm.trainingName,
       );
-      const createdSheet = await createGoogleSheetFromSourceFolder(
-        spreadsheetId,
-        buildResultSheetTitle(completionSheetForm.trainingDate),
-        preparedRows,
-      );
       const parsed = parseCompletionWorkbookRows(preparedRows);
       if (parsed.missingHeaders.length) {
         throw new Error(`이수 처리용 시트에서 필수 항목을 찾지 못했습니다: ${parsed.missingHeaders.join(", ")}`);
       }
       const normalized = normalizeApplicantRows(parsed.rows);
+      const rosterRawRows = await readGoogleRosterValues();
+      const parsedRoster = parseRosterWorkbookRows(rosterRawRows);
+      if (parsedRoster.missingHeaders.length) {
+        throw new Error(`전체명단에서 필수 항목을 찾지 못했습니다: ${parsedRoster.missingHeaders.join(", ")}`);
+      }
+      validateCompletionDocumentRosterMatches(normalized, normalizeRosterRows(parsedRoster.rows));
+      const createdSheet = await createGoogleSheetFromSourceFolder(
+        spreadsheetId,
+        buildResultSheetTitle(completionSheetForm.trainingDate),
+        preparedRows,
+      );
       const trainingNameOptions = getTrainingNameOptions(normalized);
       const people = buildAttendancePeople(normalized);
       setDocumentRows(normalized);
@@ -520,7 +536,7 @@ export function App() {
         trainingName: completionSheetForm.trainingName.trim() || trainingNameOptions[0] || current.trainingName,
         trainingDate: completionSheetForm.trainingDate.trim() || current.trainingDate,
       }));
-      setDocumentWorkflowStep("doc1");
+      setDocumentWorkflowStep("doc2");
       clearCurrentDocument();
       setNotice(`${normalized.length.toLocaleString()}명의 설문 응답으로 이수 처리용 시트를 만들었습니다: ${createdSheet.web_view_link}`);
     } catch (loadError) {
@@ -590,10 +606,11 @@ export function App() {
 
   async function buildDocumentForCurrentStep() {
     if (documentWorkflowStep === "doc1") {
+      const effectiveCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
       return {
         label: "1. (출결) 연수생 화면 캡처 출결자료",
         filename: buildAttendanceFilename(documentForm, "1. (출결) 연수생 화면 캡처 출결자료", "hwpx"),
-        blob: await createCaptureHwpx(documentForm, captureRows, captureEvidenceRows),
+        blob: await createCaptureHwpx(documentForm, effectiveCaptureRows, captureEvidenceRows),
       };
     }
     if (documentWorkflowStep === "doc2") {
@@ -614,7 +631,8 @@ export function App() {
       };
     }
     if (documentWorkflowStep === "doc3") {
-      const nextSummaryRows = summaryRows.length ? summaryRows : buildSummaryRows(captureRows, zoomRows);
+      const effectiveCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
+      const nextSummaryRows = buildSummaryRows(effectiveCaptureRows, zoomRows);
       setSummaryRows(nextSummaryRows);
       if (documentSheetSource) {
         await batchUpdateGoogleSheet(
@@ -641,9 +659,9 @@ export function App() {
       };
     }
     if (documentWorkflowStep === "doc7") {
-      const summaryByNiceNumber = new Map(summaryRows.map((row) => [row.niceNumber, row]));
+      const summaryByPerson = new Map(summaryRows.map((row) => [attendanceRowKey(row), row]));
       const completedPeople = documentPeople.filter((person) =>
-        summaryByNiceNumber.get(person.niceNumber)?.result3 === "이수",
+        summaryByPerson.get(attendanceRowKey(person))?.result3 === "이수",
       );
       const completionRows = buildCompletionRowsWithZoomMinutes(completedPeople, documentForm);
       setDocumentPreviewRows(completionRows);
@@ -684,7 +702,8 @@ export function App() {
     setBusy(true);
     try {
       const rows = await parseZoomAttendanceWorkbook(file, documentPeople, documentForm);
-      const nextSummaryRows = buildSummaryRows(captureRows, rows);
+      const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, rows);
+      const nextSummaryRows = buildSummaryRows(nextCaptureRows, rows);
       setZoomRows(rows);
       setSummaryRows(nextSummaryRows);
       setZoomFile({ name: file.name, rowCount: rows.length, missingHeaders: [] });
@@ -707,8 +726,9 @@ export function App() {
     setBusy(true);
     try {
       const applied = await applyZoomChatAttendanceText(file, captureRows, documentForm);
+      const nextSummaryCaptureRows = applyRecognizedZoomRowsToCaptureRows(applied.rows, zoomRows);
       setCaptureRows(applied.rows);
-      setSummaryRows(zoomRows.length ? buildSummaryRows(applied.rows, zoomRows) : []);
+      setSummaryRows(zoomRows.length ? buildSummaryRows(nextSummaryCaptureRows, zoomRows) : []);
       setZoomChatFile({
         name: file.name,
         rowCount: applied.startMatches + applied.endMatches,
@@ -787,7 +807,8 @@ export function App() {
         const patched = { ...row, ...patch };
         return patch.result ? patched : updateCaptureResult(patched);
       });
-      setSummaryRows(zoomRows.length ? buildSummaryRows(next, zoomRows) : []);
+      const nextSummaryCaptureRows = applyRecognizedZoomRowsToCaptureRows(next, zoomRows);
+      setSummaryRows(zoomRows.length ? buildSummaryRows(nextSummaryCaptureRows, zoomRows) : []);
       return next;
     });
     clearCurrentDocument();
@@ -796,7 +817,8 @@ export function App() {
   function updateZoomRow(index: number, patch: Partial<Pick<ZoomAttendanceRow, "result">>) {
     setZoomRows((current) => {
       const next = current.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row);
-      setSummaryRows(captureRows.length ? buildSummaryRows(captureRows, next) : []);
+      const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, next);
+      setSummaryRows(nextCaptureRows.length ? buildSummaryRows(nextCaptureRows, next) : []);
       return next;
     });
     clearCurrentDocument();
@@ -809,11 +831,14 @@ export function App() {
   function moveToDocumentStep(step: DocumentWorkflowStep) {
     clearCurrentDocument();
     setDocumentWorkflowStep(step);
-    if (step === "doc3") setSummaryRows(buildSummaryRows(captureRows, zoomRows));
+    if (step === "doc3") {
+      const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
+      setSummaryRows(buildSummaryRows(nextCaptureRows, zoomRows));
+    }
     if (step === "doc7") {
-      const summaryByNiceNumber = new Map(summaryRows.map((row) => [row.niceNumber, row]));
+      const summaryByPerson = new Map(summaryRows.map((row) => [attendanceRowKey(row), row]));
       const completedPeople = documentPeople.filter((person) =>
-        summaryByNiceNumber.get(person.niceNumber)?.result3 === "이수",
+        summaryByPerson.get(attendanceRowKey(person))?.result3 === "이수",
       );
       setDocumentPreviewRows(buildCompletionRowsWithZoomMinutes(completedPeople, documentForm));
     }
@@ -904,6 +929,59 @@ export function App() {
     }
   }
 
+  async function loadCashReceiptRoster() {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const rawRows = await readGoogleRosterValues();
+      const parsed = parseRosterWorkbookRows(rawRows);
+      if (parsed.missingHeaders.length) {
+        throw new Error(`전체명단에서 필수 항목을 찾지 못했습니다: ${parsed.missingHeaders.join(", ")}`);
+      }
+      const normalized = normalizeRosterRows(parsed.rows);
+      const trainings = buildCashReceiptTrainings(normalized);
+      setCashReceiptTrainings(trainings);
+      setCashReceiptFile({
+        name: `전체명단: ${googleStatus?.sheet_name || "명단"}`,
+        rowCount: normalized.length,
+        missingHeaders: parsed.missingHeaders,
+      });
+      setNotice(`${trainings.length.toLocaleString()}개 연수의 현금영수증 발급 대상을 찾았습니다.`);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCashReceiptFile(training: CashReceiptTraining) {
+    if (!training.phones.length) {
+      setError("저장할 현금영수증 대상자가 없습니다.");
+      return;
+    }
+    const filename = buildCashReceiptFilename(training.trainingName);
+    const path = await save({
+      defaultPath: filename,
+      filters: [{ name: "엑셀 문서", extensions: ["xlsx"] }],
+    });
+    if (!path) return;
+
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const blob = await createCashReceiptWorkbook(training.phones);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      await writeFile(path, bytes);
+      setNotice(`${training.trainingName} 현금영수증 양식을 저장했습니다.`);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function confirmReview() {
     if (summary.manual > 0) {
       setError("수동 확인 대상 또는 전체명단 정합성 오류가 남아 있습니다.");
@@ -958,7 +1036,7 @@ export function App() {
     setIssueProgress({
       current: 0,
       total: eligibleResults.length,
-      label: "영수증 파일 저장을 준비 중입니다.",
+      label: eligibleResults.length ? "영수증 파일 저장을 준비 중입니다." : "전체명단 이수 기록을 준비 중입니다.",
     });
     setBusy(true);
     try {
@@ -966,7 +1044,12 @@ export function App() {
       const trainingPeriod = buildReceiptTrainingPeriod(completionSheetForm.trainingDate);
       const { run_id: runId } = await getAppStatus();
       const folderByTraining = new Map<string, { id: string; name: string }>();
-      const completionRecordUpdates = buildCompletionRecordUpdates(completionRows, rosterRows, rosterHeaders);
+      const completionRecordUpdates = buildCompletionRecordUpdates(
+        completionRows,
+        rosterRows,
+        rosterHeaders,
+        completionSheetForm.trainingDate,
+      );
       if (completionRecordUpdates.length) {
         setIssueProgress({
           current: 0,
@@ -1014,14 +1097,14 @@ export function App() {
           });
           await batchUpdateSheet([
             {
-              range: `E${result.roster.rowNumber}`,
+              range: `F${result.roster.rowNumber}`,
               values: [[String(nextIssueCount)]],
             },
             {
               range:
                 result.nextSlot === 1
-                  ? `F${result.roster.rowNumber}:H${result.roster.rowNumber}`
-                  : `I${result.roster.rowNumber}:K${result.roster.rowNumber}`,
+                  ? `G${result.roster.rowNumber}:I${result.roster.rowNumber}`
+                  : `J${result.roster.rowNumber}:L${result.roster.rowNumber}`,
               values: [[trainingName, issuedDate, uploaded.web_view_link]],
             },
           ]);
@@ -1155,6 +1238,15 @@ export function App() {
           onLoadEvaluationSheet={loadEvaluationSheet}
           onDocumentDownloaded={markCurrentDocumentDownloaded}
         />
+      ) : activeTask === "cashReceipt" ? (
+        <CashReceiptStage
+          busy={busy}
+          rosterFile={cashReceiptFile}
+          trainings={cashReceiptTrainings}
+          onBack={returnToMenu}
+          onLoad={loadCashReceiptRoster}
+          onSave={saveCashReceiptFile}
+        />
       ) : (
         <section className="workflow-stage">
           <button className="back-button" type="button" onClick={returnToMenu} disabled={busy}>
@@ -1209,18 +1301,27 @@ export function App() {
             <StepCard
               icon={<FolderUp />}
               title="영수증 저장 및 기록"
-              description="첫 번째 대상자의 샘플 영수증을 확인한 뒤 전체 영수증 저장과 전체명단 기록을 실행합니다."
+              description={eligibleResults.length ? "첫 번째 대상자의 샘플 영수증을 확인한 뒤 전체 영수증 저장과 전체명단 기록을 실행합니다." : "이미 영수증이 발급된 대상은 PDF 생성을 생략하고 전체명단의 이수 기록만 반영합니다."}
             >
               {issueCompletion ? (
                 <IssueCompletionPanel completion={issueCompletion} onReset={resetToUpload} />
               ) : (
                 <>
-                  <div className="notice">
-                    <UploadCloud size={18} />
-                    저장된 영수증은 링크가 있는 사용자만 볼 수 있도록 공유됩니다.
-                  </div>
+                  {eligibleResults.length ? (
+                    <div className="notice">
+                      <UploadCloud size={18} />
+                      저장된 영수증은 링크가 있는 사용자만 볼 수 있도록 공유됩니다.
+                    </div>
+                  ) : (
+                    <div className="notice">
+                      <CheckCircle2 size={18} />
+                      신규 영수증 발급 대상이 없어 PDF 생성과 Drive 저장을 생략합니다.
+                    </div>
+                  )}
                   {issueProgress ? <IssueProgress progress={issueProgress} /> : null}
-                  <SamplePreview samplePdfUrl={samplePdfUrl} firstName={eligibleResults[0]?.completion.name} />
+                  {eligibleResults.length ? (
+                    <SamplePreview samplePdfUrl={samplePdfUrl} firstName={eligibleResults[0]?.completion.name} />
+                  ) : null}
                   <div className="action-row">
                     <button className="secondary-action" type="button" onClick={() => setStep("review")} disabled={busy}>
                       검토로 돌아가기
@@ -1229,9 +1330,9 @@ export function App() {
                       className="primary-action"
                       type="button"
                       onClick={generateUploadAndRecord}
-                      disabled={busy || !samplePdfUrl || !completionSheetForm.trainingDate.trim()}
+                      disabled={busy || !completionRows.length || (eligibleResults.length > 0 && !samplePdfUrl) || !completionSheetForm.trainingDate.trim()}
                     >
-                      샘플 이상 없음 · 전체 저장 시작
+                      {eligibleResults.length ? "샘플 이상 없음 · 전체 저장 시작" : "전체명단 이수 기록만 반영"}
                     </button>
                   </div>
                 </>
@@ -1242,6 +1343,68 @@ export function App() {
       )}
     </main>
   );
+}
+
+function applyRecognizedZoomRowsToCaptureRows(
+  captureRows: CaptureAttendanceRow[],
+  zoomRows: ZoomAttendanceRow[],
+): CaptureAttendanceRow[] {
+  const recognizedKeys = new Set(
+    zoomRows
+      .filter((row) => row.result === "인정")
+      .map(attendanceRowKey),
+  );
+  if (!recognizedKeys.size) return captureRows;
+  return captureRows.map((row) => {
+    if (!recognizedKeys.has(attendanceRowKey(row))) return row;
+    return updateCaptureResult({ ...row, period1: "O", period2: "O" });
+  });
+}
+
+function attendanceRowKey(row: AttendancePerson): string {
+  return row.niceNumber && row.niceNumber !== "없음"
+    ? row.niceNumber
+    : `${row.sequence}::${row.name}::${row.schoolName}`;
+}
+
+function validateCompletionDocumentRosterMatches(
+  completions: NormalizedCompletion[],
+  rosterRows: NormalizedRoster[],
+) {
+  const rosterKeys = new Map<string, number>();
+  rosterRows.forEach((row) => {
+    const key = exactRosterMatchKey(row.name, row.phone, row.school);
+    rosterKeys.set(key, (rosterKeys.get(key) ?? 0) + 1);
+  });
+
+  const issues = completions.flatMap((row) => {
+    const key = exactRosterMatchKey(row.name, row.phone, row.school);
+    const count = rosterKeys.get(key) ?? 0;
+    if (count === 1) return [];
+    return [{
+      rowNumber: row.rowNumber,
+      name: row.name || "이름 없음",
+      school: row.school || "학교명 없음",
+      phone: row.phone || "전화번호 없음",
+      reason: count === 0 ? "전체명단과 정확히 일치하지 않음" : "전체명단에 동일 정보가 중복됨",
+    }];
+  });
+
+  if (!issues.length) return;
+  const preview = issues
+    .slice(0, 10)
+    .map((issue) => `${issue.rowNumber}행 ${issue.name} / ${issue.school} / ${issue.phone}: ${issue.reason}`)
+    .join("\n");
+  const suffix = issues.length > 10 ? `\n외 ${issues.length - 10}건` : "";
+  throw new Error(`전체명단 대조에서 이름, 전화번호, 학교명이 정확히 일치하지 않는 행이 있습니다.\n${preview}${suffix}`);
+}
+
+function exactRosterMatchKey(name: string, phone: string, school: string): string {
+  return [
+    normalizeText(name),
+    normalizePhone(phone),
+    normalizeText(school),
+  ].join("::");
 }
 
 function Header({ authenticated, onLogout }: { authenticated: boolean; onLogout: () => void }) {
@@ -1303,6 +1466,10 @@ function TaskMenu({ onChoose }: { onChoose: (task: Exclude<ActiveTask, null>) =>
         <ReceiptText size={26} />
         <span>영수증 발급</span>
       </button>
+      <button className="task-button" type="button" onClick={() => onChoose("cashReceipt")}>
+        <FileSpreadsheet size={26} />
+        <span>현금영수증 발급</span>
+      </button>
     </section>
   );
 }
@@ -1335,6 +1502,73 @@ function SettingsStage({
         <button className="primary-action" type="button" onClick={onSave} disabled={busy}>
           기본 설정 저장
         </button>
+      </StepCard>
+    </section>
+  );
+}
+
+function CashReceiptStage({
+  busy,
+  rosterFile,
+  trainings,
+  onBack,
+  onLoad,
+  onSave,
+}: {
+  busy: boolean;
+  rosterFile: LoadedFileState | null;
+  trainings: CashReceiptTraining[];
+  onBack: () => void;
+  onLoad: () => void;
+  onSave: (training: CashReceiptTraining) => void;
+}) {
+  return (
+    <section className="workflow-stage">
+      <button className="back-button" type="button" onClick={onBack} disabled={busy}>
+        <ArrowLeft size={16} />
+        메뉴로 돌아가기
+      </button>
+      <StepCard
+        icon={<FileSpreadsheet />}
+        title="현금영수증 발급"
+        description="전체명단의 G열과 J열 영수증 발급 연수명을 기준으로 연수별 현금영수증 업로드 양식을 만듭니다."
+      >
+        <div className="action-row">
+          <button className="primary-action" type="button" onClick={onLoad} disabled={busy}>
+            전체명단 조회
+          </button>
+        </div>
+        <FileStatus title="전체명단" state={rosterFile} />
+        {trainings.length ? (
+          <div className="table-wrap compact-preview">
+            <table>
+              <thead>
+                <tr>
+                  <th>연수명</th>
+                  <th>대상자 수</th>
+                  <th>파일명</th>
+                  <th>저장</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trainings.map((training) => (
+                  <tr key={training.trainingName}>
+                    <td>{training.trainingName}</td>
+                    <td>{training.phones.length.toLocaleString()}명</td>
+                    <td>{buildCashReceiptFilename(training.trainingName)}</td>
+                    <td>
+                      <button className="secondary-action" type="button" onClick={() => onSave(training)} disabled={busy}>
+                        다운로드
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="muted">전체명단을 조회하면 G열/J열에 영수증 발급 기록이 있는 연수 목록이 표시됩니다.</p>
+        )}
       </StepCard>
     </section>
   );
@@ -1744,8 +1978,8 @@ function CompletionDocumentStage({
 
 function DocumentStepProgress({ current }: { current: DocumentWorkflowStep }) {
   const items: Array<{ id: DocumentWorkflowStep; label: string }> = [
-    { id: "doc1", label: "1번 캡처" },
     { id: "doc2", label: "2번 입퇴장" },
+    { id: "doc1", label: "1번 캡처" },
     { id: "doc3", label: "3번 종합" },
     { id: "doc5", label: "5번 평가" },
     { id: "doc7", label: "7번 명단" },
@@ -1803,8 +2037,8 @@ function DocumentStepActions({
 }
 
 function getNextDocumentStep(step: DocumentWorkflowStep): DocumentWorkflowStep | null {
-  if (step === "doc1") return "doc2";
-  if (step === "doc2") return "doc3";
+  if (step === "doc2") return "doc1";
+  if (step === "doc1") return "doc3";
   if (step === "doc3") return "doc5";
   if (step === "doc5") return "doc7";
   if (step === "doc7") return null;
@@ -2610,7 +2844,11 @@ function IssueCompletionPanel({
         <CheckCircle2 size={22} />
         <div>
           <h3>저장이 완료되었습니다</h3>
-          <p>{completion.count.toLocaleString()}건의 영수증 저장과 전체명단 기록을 완료했습니다.</p>
+          <p>
+            {completion.count > 0
+              ? `${completion.count.toLocaleString()}건의 영수증 저장과 전체명단 기록을 완료했습니다.`
+              : "신규 영수증 저장 없이 전체명단 이수 기록을 완료했습니다."}
+          </p>
         </div>
       </div>
       <div className="completion-links">
@@ -2798,12 +3036,13 @@ function buildCompletionRecordUpdates(
   completionRows: NormalizedCompletion[],
   rosterRows: NormalizedRoster[],
   rosterHeaders: string[],
+  trainingDate: string,
 ): Array<{ range: string; values: string[][] }> {
   if (!completionRows.length || !rosterRows.length) return [];
 
   const completedByTraining = new Map<string, Set<string>>();
   completionRows.forEach((row) => {
-    const trainingName = row.trainingName.trim();
+    const trainingName = buildRosterTrainingHeader(row.trainingName, trainingDate);
     if (!trainingName) return;
     const completed = completedByTraining.get(trainingName) ?? new Set<string>();
     completed.add(personKey(row.name, row.phone));
@@ -2813,13 +3052,13 @@ function buildCompletionRecordUpdates(
   const trainingNames = Array.from(completedByTraining.keys());
   if (!trainingNames.length) return [];
 
-  const firstRecordColumnIndex = 11; // L, zero-based
+  const firstRecordColumnIndex = 12; // M, zero-based
   const nextHeaders = [...rosterHeaders];
   const assignedColumns = new Map<string, number>();
 
   trainingNames.forEach((trainingName) => {
     const existingIndex = nextHeaders.findIndex(
-      (header, index) => index >= firstRecordColumnIndex && header.trim() === trainingName,
+      (header, index) => index >= firstRecordColumnIndex && sameRosterTrainingHeader(header, trainingName),
     );
     if (existingIndex >= 0) {
       assignedColumns.set(trainingName, existingIndex);
@@ -2849,6 +3088,32 @@ function buildCompletionRecordUpdates(
       },
     ];
   });
+}
+
+function buildRosterTrainingHeader(trainingName: string, trainingDate: string): string {
+  const cleanTrainingName = trainingName.trim();
+  if (!cleanTrainingName) return "";
+  return `${formatTrainingDatePrefix(trainingDate)} ${cleanTrainingName}`;
+}
+
+function formatTrainingDatePrefix(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+  if (match) {
+    return `${match[1].slice(2)}${match[2].padStart(2, "0")}${match[3].padStart(2, "0")}`;
+  }
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length >= 8) return digits.slice(2, 8);
+  if (digits.length >= 6) return digits.slice(0, 6);
+  return "000000";
+}
+
+function sameRosterTrainingHeader(left: string, right: string): boolean {
+  return stripRosterTrainingDatePrefix(left) === stripRosterTrainingDatePrefix(right);
+}
+
+function stripRosterTrainingDatePrefix(value: string): string {
+  return value.trim().replace(/^\d{6}\s+/, "");
 }
 
 function columnLetter(columnNumber: number): string {

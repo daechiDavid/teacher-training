@@ -17,6 +17,7 @@ export const COMPLETION_HEADERS = [
 
 export const ROSTER_HEADERS = [
   "연번",
+  "가입학기",
   "학교명",
   "이름",
   "전화번호",
@@ -33,7 +34,13 @@ export type CompletionHeader = (typeof COMPLETION_HEADERS)[number];
 export type RosterHeader = (typeof ROSTER_HEADERS)[number];
 
 export type CompletionRow = Record<CompletionHeader, string>;
-export type RosterRow = Record<RosterHeader, string>;
+export type TrainingRecordCell = {
+  header: string;
+  value: string;
+};
+export type RosterRow = Record<RosterHeader, string> & {
+  __trainingRecords?: TrainingRecordCell[];
+};
 
 export type ValidationIssue = {
   severity: "error" | "warning";
@@ -76,16 +83,19 @@ export type NormalizedCompletion = {
 export type NormalizedRoster = {
   rowNumber: number;
   sequence: string;
+  semester: string;
   name: string;
   school: string;
   phone: string;
   issueCount: number;
+  maxIssueCount: 1 | 2;
   course1: string;
   issuedAt1: string;
   link1: string;
   course2: string;
   issuedAt2: string;
   link2: string;
+  completedTrainings: string[];
 };
 
 export function normalizeText(value: unknown): string {
@@ -106,7 +116,8 @@ export function isValidMobilePhone(phone: string): boolean {
 }
 
 export function isValidNiceNumber(niceNumber: string): boolean {
-  return /^[A-Za-z]\d{9}$/.test(normalizeText(niceNumber));
+  const text = normalizeText(niceNumber);
+  return text === "없음" || /^[A-Za-z]\d{9}$/.test(text);
 }
 
 export function safeFileSegment(value: string): string {
@@ -185,16 +196,22 @@ export function normalizeRosterRows(rows: RosterRow[]): NormalizedRoster[] {
   return rows.map((row, index) => ({
     rowNumber: index + 2,
     sequence: normalizeText(row["연번"]),
+    semester: normalizeText(row["가입학기"]),
     school: normalizeText(row["학교명"]),
     name: normalizeText(row["이름"]),
     phone: normalizePhone(row["전화번호"]),
     issueCount: Number.parseInt(normalizeText(row["영수증발급횟수"]) || "0", 10),
+    maxIssueCount: normalizeText(row["가입학기"]) === "2학기" ? 1 : 2,
     course1: normalizeText(row["과정명1"]),
     issuedAt1: normalizeText(row["발급날짜1"]),
     link1: normalizeText(row["링크1"]),
     course2: normalizeText(row["과정명2"]),
     issuedAt2: normalizeText(row["발급날짜2"]),
     link2: normalizeText(row["링크2"]),
+    completedTrainings: (row.__trainingRecords ?? [])
+      .filter((record) => normalizeText(record.value).toUpperCase() === "O")
+      .map((record) => normalizeText(record.header))
+      .filter(Boolean),
   }));
 }
 
@@ -210,6 +227,25 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
         message: "영수증발급횟수는 0 이상의 숫자여야 합니다.",
       });
       return;
+    }
+
+    if (row.semester !== "1학기" && row.semester !== "2학기") {
+      issues.push({
+        severity: "error",
+        row: row.rowNumber,
+        field: "가입학기",
+        message: "가입학기는 1학기 또는 2학기여야 합니다.",
+      });
+      return;
+    }
+
+    if (row.issueCount > row.maxIssueCount) {
+      issues.push({
+        severity: "error",
+        row: row.rowNumber,
+        field: "영수증발급횟수",
+        message: `${row.semester} 가입자는 영수증을 최대 ${row.maxIssueCount}회까지만 발급할 수 있습니다.`,
+      });
     }
 
     const slot1Filled = Boolean(row.course1 && row.issuedAt1 && row.link1);
@@ -252,7 +288,7 @@ export function validateCompletionNiceNumbers(rows: NormalizedCompletion[]): Val
       severity: "error",
       row: row.rowNumber,
       field: "나이스번호",
-      message: `${row.name || "이름 없음"}: 나이스번호가 알파벳 1자리 + 숫자 9자리 형식이 아닙니다.`,
+      message: `${row.name || "이름 없음"}: 나이스번호는 알파벳 1자리 + 숫자 9자리 또는 '없음'이어야 합니다.`,
     }));
 }
 
@@ -294,7 +330,7 @@ export function matchRecipients(
       return {
         status: "manual-review",
         completion,
-        reason: "나이스번호가 알파벳 1자리 + 숫자 9자리 형식이 아닙니다.",
+        reason: "나이스번호가 알파벳 1자리 + 숫자 9자리 또는 '없음' 형식이 아닙니다.",
       };
     }
 
@@ -310,21 +346,25 @@ export function matchRecipients(
 
     const roster = matches[0];
 
-    if (roster.issueCount >= 2) {
+    if (roster.issueCount >= roster.maxIssueCount) {
       return {
         status: "excluded",
         completion,
         roster,
-        reason: "이미 영수증발급횟수가 2회 이상입니다.",
+        reason: `${roster.semester} 가입자의 영수증 최대 발급 횟수(${roster.maxIssueCount}회)에 도달했습니다.`,
       };
     }
 
-    if ([roster.course1, roster.course2].includes(completion.trainingName)) {
+    if (
+      [roster.course1, roster.course2, ...roster.completedTrainings].some((training) =>
+        sameTrainingTitle(training, completion.trainingName),
+      )
+    ) {
       return {
         status: "excluded",
         completion,
         roster,
-        reason: "같은 연수과정명으로 이미 발급된 기록이 있습니다.",
+        reason: "같은 연수과정으로 이미 이수 기록이 있습니다.",
       };
     }
 
@@ -346,4 +386,12 @@ export function matchRecipients(
 
 export function personKey(name: string, phone: string): string {
   return `${normalizeText(name)}::${normalizeComparablePhone(phone)}`;
+}
+
+function sameTrainingTitle(recordedTraining: string, completionTraining: string): boolean {
+  return stripTrainingDatePrefix(recordedTraining) === stripTrainingDatePrefix(completionTraining);
+}
+
+function stripTrainingDatePrefix(value: string): string {
+  return normalizeText(value).replace(/^\d{6}\s+/, "");
 }

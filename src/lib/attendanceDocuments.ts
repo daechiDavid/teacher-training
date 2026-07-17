@@ -143,7 +143,7 @@ export function buildAttendancePeople(rows: NormalizedCompletion[]): AttendanceP
       sequence: String(index + 1),
       name: row.name,
       niceNumber: row.niceNumber,
-      schoolName: buildSchoolName(row.region, row.school),
+      schoolName: normalizeText(row.school),
       source: row,
     }));
 }
@@ -202,8 +202,8 @@ export async function applyZoomChatAttendanceText(
   let startMatches = 0;
   let endMatches = 0;
   const nextRows = rows.map((row) => {
-    const period1 = [...startNames].some((speaker) => isZoomNameMatch(speaker, row.name)) ? "O" : row.period1;
-    const period2 = [...endNames].some((speaker) => isZoomNameMatch(speaker, row.name)) ? "O" : row.period2;
+    const period1 = [...startNames].some((speaker) => isZoomAttendanceRecordMatch(speaker, row)) ? "O" : row.period1;
+    const period2 = [...endNames].some((speaker) => isZoomAttendanceRecordMatch(speaker, row)) ? "O" : row.period2;
     if (period1 === "O" && row.period1 !== "O") startMatches += 1;
     if (period2 === "O" && row.period2 !== "O") endMatches += 1;
     return updateCaptureResult({ ...row, period1, period2 });
@@ -229,9 +229,10 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
   }));
   const start = parseMinutes(form.startTime);
   const end = parseMinutes(form.endTime);
+  const entryFloor = start == null ? null : start - 10;
 
   return people.map((person) => {
-    const matches = records.filter((record) => isZoomNameMatch(record.zoomName, person.name));
+    const matches = records.filter((record) => isZoomAttendanceRecordMatch(record.zoomName, person));
     const entryMinutes = matches.map((match) => parseMinutes(match.entry)).filter((value) => value != null) as number[];
     const exitMinutes = matches.map((match) => parseMinutes(match.exit)).filter((value) => value != null) as number[];
     const rawMinutes = Math.round(matches.reduce((sum, match) => sum + match.minutes, 0));
@@ -243,10 +244,12 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
     }, 0);
     const effectiveMinutes = Math.max(0, Math.round(clippedMinutes - 10));
     const result = effectiveMinutes >= 80 ? "인정" : "미인정";
+    const earliestEntry = entryMinutes.length ? Math.min(...entryMinutes) : null;
+    const latestExit = exitMinutes.length ? Math.max(...exitMinutes) : null;
     return {
       ...person,
-      entryTime: entryMinutes.length ? formatMinutes(Math.min(...entryMinutes)) : "",
-      exitTime: exitMinutes.length ? formatMinutes(Math.max(...exitMinutes)) : "",
+      entryTime: earliestEntry == null ? "-" : formatMinutes(entryFloor == null ? earliestEntry : Math.max(earliestEntry, entryFloor)),
+      exitTime: latestExit == null ? "-" : formatMinutes(latestExit),
       rawMinutes,
       effectiveMinutes,
       result,
@@ -398,9 +401,9 @@ function parseElapsedMinutes(value: string): number | null {
 }
 
 export function buildSummaryRows(captureRows: CaptureAttendanceRow[], zoomRows: ZoomAttendanceRow[]): SummaryAttendanceRow[] {
-  const zoomByName = new Map(zoomRows.map((row) => [row.name, row]));
+  const zoomByPerson = new Map(zoomRows.map((row) => [attendancePersonKey(row), row]));
   return captureRows.map((row) => {
-    const zoom = zoomByName.get(row.name);
+    const zoom = zoomByPerson.get(attendancePersonKey(row));
     const result2 = zoom?.result ?? "미인정";
     return {
       ...row,
@@ -417,17 +420,25 @@ export function countSummary(rows: SummaryAttendanceRow[]) {
 }
 
 export function parseEvaluationRows(rawRows: unknown[][]): EvaluationSummary {
-  if (rawRows.length < 2) {
+  const lastDataRowIndex = findLastMeaningfulRowIndex(rawRows);
+  if (lastDataRowIndex < 1) {
     return { respondentCount: 0, averages: Array(11).fill(""), opinion1: "", opinion2: "" };
   }
-  const last = rawRows[rawRows.length - 1] ?? [];
-  const dataRows = rawRows.slice(1, -1);
+  const last = rawRows[lastDataRowIndex] ?? [];
+  const dataRows = rawRows.slice(1, lastDataRowIndex);
   return {
-    respondentCount: dataRows.length,
+    respondentCount: Math.max(0, lastDataRowIndex - 1),
     averages: Array.from({ length: 11 }, (_, index) => normalizeText(last[index + 1])),
     opinion1: dataRows.map((row) => normalizeText(row[12])).filter(Boolean).join("\n"),
     opinion2: dataRows.map((row) => normalizeText(row[13])).filter(Boolean).join("\n"),
   };
+}
+
+function findLastMeaningfulRowIndex(rows: unknown[][]): number {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if ((rows[index] ?? []).some((cell) => normalizeText(cell))) return index;
+  }
+  return -1;
 }
 
 export function buildCompletionRowsWithZoomMinutes(
@@ -448,7 +459,7 @@ export async function createCaptureHwpx(form: AttendanceBaseForm, rows: CaptureA
 
 export async function createZoomHwpx(form: AttendanceBaseForm, rows: ZoomAttendanceRow[]): Promise<Blob> {
   const replacements = {
-    "시작시간": form.startTime,
+    "시작시간": addMinutesText(form.startTime, -10),
     "종료시간": form.endTime,
     "시작마감시간": addMinutesText(form.startTime, 20),
     "종료마감시간": addMinutesText(form.endTime, 10),
@@ -476,6 +487,7 @@ export async function createEvaluationHwpx(
     "등록자": String(completionCount + incompleteCount),
     "이수자": String(completionCount),
     "미이수자": String(incompleteCount),
+    "평가참여자": String(evaluation.respondentCount),
     "강사명": form.instructorName,
     "종합의견_1": evaluation.opinion1,
     "종합의견_2": evaluation.opinion2,
@@ -874,15 +886,6 @@ function splitDate(value: string) {
   return { year: match[1], month: String(Number(match[2])), day: String(Number(match[3])) };
 }
 
-function buildSchoolName(region: string, school: string): string {
-  const cleanRegion = normalizeText(region);
-  const cleanSchool = normalizeText(school);
-  if (!cleanRegion) return cleanSchool;
-  if (!cleanSchool) return cleanRegion;
-  if (cleanSchool.startsWith(cleanRegion)) return cleanSchool;
-  return `${cleanRegion} ${cleanSchool}`;
-}
-
 function normalizeTime(value: unknown): string {
   const text = normalizeText(value);
   const match = text.match(/(\d{1,2}):(\d{2})/);
@@ -921,8 +924,108 @@ function addMinutesText(value: string, amount: number): string {
 }
 
 function isZoomNameMatch(zoomName: string, name: string): boolean {
-  const compact = zoomName.replace(/\s+/g, "");
-  return Boolean(name && compact.includes(name.replace(/\s+/g, "")));
+  const compact = compactMatchText(stripZoomOriginalNameSuffix(zoomName));
+  return Boolean(name && compact.includes(compactMatchText(name)));
+}
+
+function isZoomAttendanceRecordMatch(zoomName: string, person: AttendancePerson): boolean {
+  const parsed = parseZoomNameAndSchool(zoomName);
+  if (parsed.name) {
+    if (parsed.name !== compactMatchText(person.name)) return false;
+    return !parsed.school || isSchoolNameMatch(parsed.school, person.source.school);
+  }
+
+  if (!isZoomNameMatch(zoomName, person.name)) return false;
+  const zoomSchool = extractZoomSchoolToken(zoomName, person.name);
+  if (!zoomSchool) return true;
+  return isSchoolNameMatch(zoomSchool, person.source.school);
+}
+
+function parseZoomNameAndSchool(zoomName: string): { name: string; school: string } {
+  const parts = normalizeText(stripZoomOriginalNameSuffix(zoomName))
+    .split(/[_/()\-\s]+/)
+    .map(compactMatchText)
+    .filter(Boolean);
+  return parts.length >= 2 ? { name: parts[0], school: parts.slice(1).join("") } : { name: "", school: "" };
+}
+
+function extractZoomSchoolToken(zoomName: string, personName: string): string {
+  const compactName = compactMatchText(personName);
+  if (!compactName) return "";
+  const strippedZoomName = stripZoomOriginalNameSuffix(zoomName);
+  const parts = normalizeText(strippedZoomName)
+    .split(/[_/()\-\s]+/)
+    .map(compactMatchText)
+    .filter(Boolean);
+  if (parts.length >= 2 && (parts[0] === compactName || parts[0].includes(compactName) || compactName.includes(parts[0]))) {
+    return parts.slice(1).join("");
+  }
+
+  const compactZoomName = compactMatchText(strippedZoomName);
+  const nameIndex = compactZoomName.indexOf(compactName);
+  if (nameIndex < 0) return "";
+  return compactZoomName.slice(nameIndex + compactName.length);
+}
+
+function stripZoomOriginalNameSuffix(value: string): string {
+  return normalizeText(value).replace(/\s+\(.*\)\s*$/, "");
+}
+
+function compactMatchText(value: string): string {
+  return normalizeText(value).replace(/\s+/g, "");
+}
+
+function isSchoolNameMatch(zoomSchool: string, rosterSchool: string): boolean {
+  const zoom = normalizeSchoolMatchText(zoomSchool);
+  const roster = normalizeSchoolMatchText(rosterSchool);
+  if (!zoom || !roster) return false;
+  return roster.includes(zoom) || zoom.includes(roster);
+}
+
+function normalizeSchoolMatchText(value: string): string {
+  return normalizeUniversityAttachedSchoolName(compactMatchText(value))
+    .replace(/병설유치원/g, "병유")
+    .replace(/공업고등학교/g, "공고")
+    .replace(/공업고/g, "공고")
+    .replace(/외국어고등학교/g, "외고")
+    .replace(/외국어고/g, "외고")
+    .replace(/초등학교/g, "초")
+    .replace(/중학교/g, "중")
+    .replace(/고등학교/g, "고")
+    .replace(/여자/g, "여")
+    .replace(/남자/g, "남")
+    .replace(/학교/g, "");
+}
+
+function normalizeUniversityAttachedSchoolName(value: string): string {
+  const match = value.match(/^(.+?)(?:여자대학교|대학교|여자대|대)(?:사범대학)?(?:부속|부설)(.+)$/);
+  if (!match) return value;
+  const university = match[1];
+  const school = match[2];
+  const universityAbbreviation = universityAbbreviations[university] ?? `${university.slice(0, 1)}대`;
+  return `${universityAbbreviation}부${normalizeAttachedSchoolLevel(school)}`;
+}
+
+function normalizeAttachedSchoolLevel(value: string): string {
+  return value
+    .replace(/초등학교/g, "초")
+    .replace(/중학교/g, "중")
+    .replace(/고등학교/g, "고")
+    .replace(/유치원/g, "유")
+    .replace(/학교/g, "");
+}
+
+const universityAbbreviations: Record<string, string> = {
+  한양: "한대",
+  단국: "단대",
+  이화: "이대",
+  이화여자: "이대",
+};
+
+function attendancePersonKey(person: AttendancePerson): string {
+  return person.niceNumber && person.niceNumber !== "없음"
+    ? person.niceNumber
+    : `${person.sequence}::${person.name}::${person.schoolName}`;
 }
 
 function escapeXml(value: string): string {
