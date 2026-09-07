@@ -268,7 +268,7 @@ export function App() {
     trainingName: "",
     institute: "",
     trainingDate: "",
-    totalHours: "",
+    totalHours: "100",
     startTime: "",
     endTime: "",
     period1Label: "",
@@ -738,8 +738,9 @@ export function App() {
   }
 
   function updateCompletionDocumentForm(nextForm: AttendanceBaseForm) {
-    const timeChanged = documentForm.startTime !== nextForm.startTime || documentForm.endTime !== nextForm.endTime;
-    setDocumentForm(nextForm);
+    const derivedForm = deriveAttendanceFormFromStartTime(nextForm);
+    const timeChanged = documentForm.startTime !== derivedForm.startTime || documentForm.endTime !== derivedForm.endTime;
+    setDocumentForm(derivedForm);
     setDocumentPreviewRows([]);
     if (timeChanged) {
       setZoomChatFile(null);
@@ -2159,11 +2160,11 @@ function CompletionDocumentFormView({
         />
       </label>
       <label>
-        <span>연수 총 시간</span>
+        <span>연수 총 시간 (100분 고정)</span>
         <input
           value={value.totalHours}
-          onChange={(event) => onChange({ ...value, totalHours: event.target.value })}
-          inputMode="numeric"
+          readOnly
+          aria-label="연수 총 시간 (100분 고정)"
           disabled={busy}
         />
       </label>
@@ -2180,8 +2181,8 @@ function CompletionDocumentFormView({
         <span>연수 종료시간</span>
         <input
           value={value.endTime}
-          onChange={(event) => onChange({ ...value, endTime: event.target.value })}
           placeholder="HH:mm"
+          readOnly
           disabled={busy}
         />
       </label>
@@ -2189,8 +2190,8 @@ function CompletionDocumentFormView({
         <span>1교시 라벨</span>
         <input
           value={value.period1Label}
-          onChange={(event) => onChange({ ...value, period1Label: event.target.value })}
-          placeholder="1교시 13:00부터 13:50까지"
+          placeholder="1교시 13:00~13:50"
+          readOnly
           disabled={busy}
         />
       </label>
@@ -2198,8 +2199,8 @@ function CompletionDocumentFormView({
         <span>2교시 라벨</span>
         <input
           value={value.period2Label}
-          onChange={(event) => onChange({ ...value, period2Label: event.target.value })}
-          placeholder="2교시 14:00부터 14:50까지"
+          placeholder="2교시 14:00~14:50"
+          readOnly
           disabled={busy}
         />
       </label>
@@ -2744,9 +2745,9 @@ function CompletionSheetUrlForm({
           <label>
             <span>강의 날짜</span>
             <input
+              type="date"
               value={value.trainingDate}
               onChange={(event) => onChange({ ...value, trainingDate: event.target.value })}
-              placeholder="예: 2026-06-06"
               disabled={busy}
             />
           </label>
@@ -2767,7 +2768,7 @@ function CompletionSheetUrlForm({
         {mode === "form-results"
           ? "설문 결과의 C열부터 K열까지를 복사해 같은 폴더에 이수 처리용 Google Sheet를 만듭니다."
           : mode === "receipt-sheet"
-            ? "영수증은 기본 설정의 작업 루트 폴더 아래 이수증&영수증 폴더를 만들고, 그 안의 날짜 폴더 아래 영수증 폴더에 저장됩니다."
+            ? "영수증은 기본 설정의 작업 루트 폴더 아래 이수증&영수증 폴더를 만들고, 그 안의 날짜 폴더 아래 준비중영수증 폴더에 저장됩니다."
           : "주소에 특정 탭 정보가 있으면 해당 탭을, 없으면 첫 번째 탭을 읽습니다."}
       </p>
     </div>
@@ -3194,6 +3195,44 @@ function extractGoogleSheetGid(value: string): number | undefined {
   const hashMatch = trimmed.match(/[#&?]gid=(\d+)/);
   if (!hashMatch?.[1]) return undefined;
   return Number.parseInt(hashMatch[1], 10);
+}
+
+function deriveAttendanceFormFromStartTime(form: AttendanceBaseForm): AttendanceBaseForm {
+  const startTime = form.startTime.trim();
+  if (!isValidTimeText(startTime)) {
+    return {
+      ...form,
+      totalHours: "100",
+      endTime: "",
+      period1Label: "",
+      period2Label: "",
+    };
+  }
+
+  const startMinutes = timeTextToMinutes(startTime);
+  const period1End = minutesToTimeText(startMinutes + 50);
+  const period2Start = minutesToTimeText(startMinutes + 60);
+  const period2End = minutesToTimeText(startMinutes + 110);
+  return {
+    ...form,
+    startTime,
+    totalHours: "100",
+    endTime: period2End,
+    period1Label: `1교시 ${startTime}~${period1End}`,
+    period2Label: `2교시 ${period2Start}~${period2End}`,
+  };
+}
+
+function timeTextToMinutes(value: string): number {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function minutesToTimeText(value: number): string {
+  const normalized = ((value % 1440) + 1440) % 1440;
+  const hours = Math.floor(normalized / 60);
+  const minutes = normalized % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function isValidTimeText(value: string): boolean {

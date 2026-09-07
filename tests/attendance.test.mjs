@@ -25,6 +25,7 @@ registerHooks({
 const {
   buildDefaultCaptureRows, updateCaptureResult, applyZoomChatAttendanceText,
   applyRecognizedZoomRowsToCaptureRows: applyZoom, buildSummaryRows,
+  calculateEffectiveZoomMinutes,
 } = await import('../src/lib/attendanceDocuments.ts');
 const people = ['김가람', '이보람', '박다솜'].map((name, index) => ({
   sequence: String(index + 1), name, niceNumber: '없음', schoolName: '테스트학교', source: {},
@@ -73,4 +74,14 @@ test('2번 인정 중 입력한 채팅도 보존하고 미인정으로 바뀌면
   assert.deepEqual(marks(applyZoom(applied.rows, zoom(['미인정', '인정', '미인정']))), [
     ['O', 'X', '미인정'], ['O', 'O', '인정'], ['X', 'X', '미인정'],
   ]);
+});
+
+test('접속시간은 쉬는시간 10분만 제외하고 연수 구간 안에서 계산', () => {
+  const start = 20 * 60;
+  const end = 21 * 60 + 50;
+  assert.equal(calculateEffectiveZoomMinutes(start, start + 50, start, end), 50);
+  assert.equal(calculateEffectiveZoomMinutes(start, end, start, end), 100);
+  assert.equal(calculateEffectiveZoomMinutes(start + 50, start + 60, start, end), 0);
+  assert.equal(calculateEffectiveZoomMinutes(start + 55, start + 80, start, end), 20);
+  assert.equal(calculateEffectiveZoomMinutes(start - 30, start + 20, start, end), 20);
 });

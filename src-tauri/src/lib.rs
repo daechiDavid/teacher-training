@@ -1091,7 +1091,10 @@ fn drive_create_training_folder(
     let date_folder_name = safe_drive_name(&folder_name_from_training_date(&request.training_date)?);
     let date_folder =
         drive_find_or_create_folder_with_parent(&token, &receipt_root.id, &date_folder_name)?;
-    drive_find_or_create_folder_with_parent(&token, &date_folder.id, "영수증")
+    // Receipts are staged here while the issuance workflow is running. This
+    // keeps an interrupted or partially completed batch out of the final
+    // receipt folder.
+    drive_find_or_create_folder_with_parent(&token, &date_folder.id, "준비중영수증")
 }
 
 #[tauri::command]

@@ -257,13 +257,12 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
     const entryMinutes = matches.map((match) => parseMinutes(match.entry)).filter((value) => value != null) as number[];
     const exitMinutes = matches.map((match) => parseMinutes(match.exit)).filter((value) => value != null) as number[];
     const rawMinutes = Math.round(matches.reduce((sum, match) => sum + match.minutes, 0));
-    const clippedMinutes = matches.reduce((sum, match) => {
+    const effectiveMinutes = matches.reduce((sum, match) => {
       const entry = parseMinutes(match.entry);
       const exit = parseMinutes(match.exit);
       if (entry == null || exit == null || start == null || end == null) return sum;
-      return sum + Math.max(0, Math.min(exit, end) - Math.max(entry, start));
+      return sum + calculateEffectiveZoomMinutes(entry, exit, start, end);
     }, 0);
-    const effectiveMinutes = Math.max(0, Math.round(clippedMinutes - 10));
     const result = effectiveMinutes >= 80 ? "인정" : "미인정";
     const earliestEntry = entryMinutes.length ? Math.min(...entryMinutes) : null;
     const latestExit = exitMinutes.length ? Math.max(...exitMinutes) : null;
@@ -277,6 +276,35 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
       warning: !matches.length ? "줌 접속기록 없음" : rawMinutes < 80 ? "U열 기간 합계 80분 미만 확인 필요" : undefined,
     };
   });
+}
+
+/**
+ * Count only the part of a Zoom session inside the training interval and
+ * remove the single 10-minute break between the two 50-minute periods.
+ */
+export function calculateEffectiveZoomMinutes(
+  entry: number,
+  exit: number,
+  start: number,
+  end: number,
+): number {
+  const normalizedEnd = end < start ? end + 1440 : end;
+  const normalizedEntry = normalizeMinuteNearRange(entry, start, normalizedEnd);
+  let normalizedExit = normalizeMinuteNearRange(exit, start, normalizedEnd);
+  if (normalizedExit < normalizedEntry) normalizedExit += 1440;
+
+  const clippedStart = Math.max(normalizedEntry, start);
+  const clippedEnd = Math.min(normalizedExit, normalizedEnd);
+  const clippedMinutes = Math.max(0, clippedEnd - clippedStart);
+  if (clippedMinutes === 0) return 0;
+
+  const breakStart = start + 50;
+  const breakEnd = start + 60;
+  const breakMinutes = Math.max(
+    0,
+    Math.min(clippedEnd, breakEnd) - Math.max(clippedStart, breakStart),
+  );
+  return Math.max(0, Math.round(clippedMinutes - breakMinutes));
 }
 
 async function readZoomRows(file: File): Promise<unknown[][]> {
