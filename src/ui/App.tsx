@@ -43,6 +43,7 @@ import {
   AttendanceBaseForm,
   AttendancePerson,
   applyZoomChatAttendanceText,
+  applyRecognizedZoomRowsToCaptureRows,
   buildAttendanceFilename,
   buildAttendancePeople,
   buildCompletionRowsWithZoomMinutes,
@@ -276,8 +277,13 @@ export function App() {
   });
   const [documentPreviewRows, setDocumentPreviewRows] = useState<CompletionDocumentRow[]>([]);
   const [documentPeople, setDocumentPeople] = useState<AttendancePerson[]>([]);
+  // Keep chat/manual attendance separate from the automatic Zoom recognition override.
   const [captureRows, setCaptureRows] = useState<CaptureAttendanceRow[]>([]);
   const [zoomRows, setZoomRows] = useState<ZoomAttendanceRow[]>([]);
+  const effectiveCaptureRows = useMemo(
+    () => applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows),
+    [captureRows, zoomRows],
+  );
   const [summaryRows, setSummaryRows] = useState<SummaryAttendanceRow[]>([]);
   const [captureEvidenceRows, setCaptureEvidenceRows] = useState<CaptureEvidenceRow[]>([createEmptyCaptureEvidenceRow()]);
   const [zoomChatFile, setZoomChatFile] = useState<LoadedFileState | null>(null);
@@ -665,7 +671,6 @@ export function App() {
 
   async function buildDocumentForCurrentStep() {
     if (documentWorkflowStep === "doc1") {
-      const effectiveCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
       return {
         label: "1. (출결) 연수생 화면 캡처 출결자료",
         filename: buildAttendanceFilename(documentForm, "1. (출결) 연수생 화면 캡처 출결자료", "hwpx"),
@@ -690,8 +695,7 @@ export function App() {
       };
     }
     if (documentWorkflowStep === "doc3") {
-      const effectiveCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
-      const nextSummaryRows = buildSummaryRows(effectiveCaptureRows, zoomRows);
+      const nextSummaryRows = buildSummaryRows(captureRows, zoomRows);
       setSummaryRows(nextSummaryRows);
       if (documentSheetSource) {
         await batchUpdateGoogleSheet(
@@ -761,10 +765,8 @@ export function App() {
     setBusy(true);
     try {
       const rows = await parseZoomAttendanceWorkbook(file, documentPeople, documentForm);
-      const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, rows);
-      const nextSummaryRows = buildSummaryRows(nextCaptureRows, rows);
+      const nextSummaryRows = buildSummaryRows(captureRows, rows);
       setZoomRows(rows);
-      setCaptureRows(nextCaptureRows);
       setSummaryRows(nextSummaryRows);
       setZoomFile({ name: file.name, rowCount: rows.length, missingHeaders: [] });
       clearCurrentDocument();
@@ -786,9 +788,8 @@ export function App() {
     setBusy(true);
     try {
       const applied = await applyZoomChatAttendanceText(file, captureRows, documentForm);
-      const nextSummaryCaptureRows = applyRecognizedZoomRowsToCaptureRows(applied.rows, zoomRows);
-      setCaptureRows(nextSummaryCaptureRows);
-      setSummaryRows(zoomRows.length ? buildSummaryRows(nextSummaryCaptureRows, zoomRows) : []);
+      setCaptureRows(applied.rows);
+      setSummaryRows(zoomRows.length ? buildSummaryRows(applied.rows, zoomRows) : []);
       setZoomChatFile({
         name: file.name,
         rowCount: applied.startMatches + applied.endMatches,
@@ -895,8 +896,7 @@ export function App() {
         const patched = { ...row, ...patch };
         return patch.result ? patched : updateCaptureResult(patched);
       });
-      const nextSummaryCaptureRows = applyRecognizedZoomRowsToCaptureRows(next, zoomRows);
-      setSummaryRows(zoomRows.length ? buildSummaryRows(nextSummaryCaptureRows, zoomRows) : []);
+      setSummaryRows(zoomRows.length ? buildSummaryRows(next, zoomRows) : []);
       return next;
     });
     clearCurrentDocument();
@@ -905,8 +905,7 @@ export function App() {
   function updateZoomRow(index: number, patch: Partial<Pick<ZoomAttendanceRow, "result">>) {
     setZoomRows((current) => {
       const next = current.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row);
-      const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, next);
-      setSummaryRows(nextCaptureRows.length ? buildSummaryRows(nextCaptureRows, next) : []);
+      setSummaryRows(captureRows.length ? buildSummaryRows(captureRows, next) : []);
       return next;
     });
     clearCurrentDocument();
@@ -919,12 +918,8 @@ export function App() {
   function moveToDocumentStep(step: DocumentWorkflowStep) {
     clearCurrentDocument();
     setDocumentWorkflowStep(step);
-    if (step === "doc1") {
-      setCaptureRows((current) => applyRecognizedZoomRowsToCaptureRows(current, zoomRows));
-    }
     if (step === "doc3") {
-      const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
-      setSummaryRows(buildSummaryRows(nextCaptureRows, zoomRows));
+      setSummaryRows(buildSummaryRows(captureRows, zoomRows));
     }
     if (step === "doc7") {
       const summaryByPerson = new Map(summaryRows.map((row) => [attendanceRowKey(row), row]));
@@ -1301,7 +1296,7 @@ export function App() {
           issues={documentIssues}
           previewRows={documentPreviewRows}
           people={documentPeople}
-          captureRows={captureRows}
+          captureRows={effectiveCaptureRows}
           zoomRows={zoomRows}
           summaryRows={summaryRows}
           captureEvidenceRows={captureEvidenceRows}
@@ -1436,24 +1431,6 @@ export function App() {
       )}
     </main>
   );
-}
-
-function applyRecognizedZoomRowsToCaptureRows(
-  captureRows: CaptureAttendanceRow[],
-  zoomRows: ZoomAttendanceRow[],
-): CaptureAttendanceRow[] {
-  // 2번 줌 접속기록에서 인정된 수강생은 1번 채팅 출결과 무관하게
-  // 두 교시 모두 O/인정으로 유지한다. 미인정 수강생은 채팅 반영 결과를 그대로 둔다.
-  const recognizedKeys = new Set(
-    zoomRows
-      .filter((row) => row.result === "인정")
-      .map(attendanceRowKey),
-  );
-  if (!recognizedKeys.size) return captureRows;
-  return captureRows.map((row) => {
-    if (!recognizedKeys.has(attendanceRowKey(row))) return row;
-    return updateCaptureResult({ ...row, period1: "O", period2: "O" });
-  });
 }
 
 function attendanceRowKey(row: AttendancePerson): string {

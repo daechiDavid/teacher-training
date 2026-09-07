@@ -172,6 +172,19 @@ export function updateCaptureResult(row: CaptureAttendanceRow): CaptureAttendanc
   };
 }
 
+/** Derive document 1 without writing automatic O marks into chat/manual attendance. */
+export function applyRecognizedZoomRowsToCaptureRows(
+  captureRows: CaptureAttendanceRow[],
+  zoomRows: ZoomAttendanceRow[],
+): CaptureAttendanceRow[] {
+  const recognizedKeys = new Set(
+    zoomRows.filter((row) => row.result === "인정").map(attendancePersonKey),
+  );
+  return captureRows.map((row) => recognizedKeys.has(attendancePersonKey(row))
+    ? updateCaptureResult({ ...row, period1: "O", period2: "O" })
+    : row);
+}
+
 export async function applyZoomChatAttendanceText(
   file: File,
   rows: CaptureAttendanceRow[],
@@ -410,7 +423,7 @@ function parseElapsedMinutes(value: string): number | null {
 
 export function buildSummaryRows(captureRows: CaptureAttendanceRow[], zoomRows: ZoomAttendanceRow[]): SummaryAttendanceRow[] {
   const zoomByPerson = new Map(zoomRows.map((row) => [attendancePersonKey(row), row]));
-  return captureRows.map((row) => {
+  return applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows).map((row) => {
     const zoom = zoomByPerson.get(attendancePersonKey(row));
     const result2 = zoom?.result ?? "미인정";
     return {
