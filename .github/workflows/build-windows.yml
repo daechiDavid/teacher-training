@@ -46,6 +46,14 @@ jobs:
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText($oauthPath, $env:GOOGLE_OAUTH_JSON, $utf8NoBom)
 
+      - name: Enable VBScript for WiX MSI bundling
+        shell: pwsh
+        run: |
+          dism.exe /online /enable-feature /featurename:VBSCRIPT /all /norestart
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
+            throw "Could not enable the Windows VBScript optional feature. DISM exit code: $LASTEXITCODE"
+          }
+
       - name: Build Tauri Windows installers
         run: pnpm tauri build
 
