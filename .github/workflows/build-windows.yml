@@ -49,9 +49,18 @@ jobs:
       - name: Enable VBScript for WiX MSI bundling
         shell: pwsh
         run: |
-          dism.exe /online /enable-feature /featurename:VBSCRIPT /all /norestart
-          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
-            throw "Could not enable the Windows VBScript optional feature. DISM exit code: $LASTEXITCODE"
+          $vbscript = Get-WindowsCapability -Online |
+            Where-Object { $_.Name -like "VBSCRIPT*" } |
+            Select-Object -First 1
+          if ($null -eq $vbscript) {
+            throw "The Windows VBScript capability is not available on this runner."
+          }
+          if ($vbscript.State -ne "Installed") {
+            Add-WindowsCapability -Online -Name $vbscript.Name
+          }
+          $vbscript = Get-WindowsCapability -Online -Name $vbscript.Name
+          if ($vbscript.State -ne "Installed") {
+            throw "Could not enable the Windows VBScript capability. State: $($vbscript.State)"
           }
 
       - name: Build Tauri Windows installers
