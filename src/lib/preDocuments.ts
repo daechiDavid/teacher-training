@@ -1,17 +1,20 @@
 import doc1TemplateUrl from "../../hwpx_template/doc1.hwpx?url";
 import doc3TemplateUrl from "../../hwpx_template/doc3.hwpx?url";
 import doc4TemplateUrl from "../../hwpx_template/doc4.hwpx?url";
-import { createHwpxFromTemplateUrl } from "./attendanceDocuments";
+import {
+  createHwpxFromTemplateUrl,
+  HwpxPreliminaryTrainingRow,
+} from "./attendanceDocuments";
 
 export type PreliminaryTrainingSet = {
+  id?: string;
   trainingName: string;
   trainingDate: string;
   instructorName: string;
 };
 
 export type PreliminaryDocumentForm = {
-  training1: PreliminaryTrainingSet;
-  training2: PreliminaryTrainingSet;
+  trainings: PreliminaryTrainingSet[];
 };
 
 export type PreliminaryGeneratedDocument = {
@@ -23,33 +26,39 @@ export type PreliminaryGeneratedDocument = {
 export async function createPreliminaryDocuments(
   form: PreliminaryDocumentForm,
 ): Promise<PreliminaryGeneratedDocument[]> {
-  const date1 = parseTrainingDate(form.training1.trainingDate);
-  const date2 = parseTrainingDate(form.training2.trainingDate);
+  if (!form.trainings.length) {
+    throw new Error("최소 1개의 연수를 입력하세요.");
+  }
+  const firstTraining = form.trainings[0];
+  const firstDate = parseTrainingDate(firstTraining.trainingDate);
   const common = {
-    yyyy: date1.year,
-    M: date1.month,
-    "연수1_연수명": form.training1.trainingName,
-    "연수1_강사": form.training1.instructorName,
-    "연수2_연수명": form.training2.trainingName,
-    "연수2_강사": form.training2.instructorName,
+    yyyy: firstDate.year,
+    M: firstDate.month,
   };
+  const trainingRows: HwpxPreliminaryTrainingRow[] = form.trainings.map((training, index) => ({
+    number: String(index + 1),
+    name: training.trainingName,
+    instructor: training.instructorName,
+  }));
 
-  const doc1 = await createHwpxFromTemplateUrl(doc1TemplateUrl, common);
-  const doc3A = await createHwpxFromTemplateUrl(doc3TemplateUrl, {
-    ...common,
-    yyyy: date1.year,
-    MM: date1.month.padStart(2, "0"),
-    dd: date1.day.padStart(2, "0"),
-    연수명: form.training1.trainingName,
+  const doc1 = await createHwpxFromTemplateUrl(doc1TemplateUrl, common, {
+    preliminaryTrainingRows: trainingRows,
   });
-  const doc3B = await createHwpxFromTemplateUrl(doc3TemplateUrl, {
-    ...common,
-    yyyy: date2.year,
-    MM: date2.month.padStart(2, "0"),
-    dd: date2.day.padStart(2, "0"),
-    연수명: form.training2.trainingName,
+  const doc3Documents = await Promise.all(form.trainings.map(async (training) => {
+    const date = parseTrainingDate(training.trainingDate);
+    return createHwpxFromTemplateUrl(doc3TemplateUrl, {
+      ...common,
+      yyyy: date.year,
+      M: date.month,
+      MM: date.month.padStart(2, "0"),
+      // 확약서 본문의 제출일은 연수 예정 월의 첫날로 고정한다.
+      dd: "01",
+      연수명: training.trainingName,
+    });
+  }));
+  const doc4 = await createHwpxFromTemplateUrl(doc4TemplateUrl, common, {
+    preliminaryTrainingRows: trainingRows,
   });
-  const doc4 = await createHwpxFromTemplateUrl(doc4TemplateUrl, common);
 
   return [
     {
@@ -57,16 +66,11 @@ export async function createPreliminaryDocuments(
       filename: "1. 실시간 쌍방향 연수과정 연수 계획서 제출 공문.hwpx",
       blob: doc1,
     },
-    {
-      label: "3-1. 확약서",
-      filename: "3-1. 확약서.hwpx",
-      blob: doc3A,
-    },
-    {
-      label: "3-2. 확약서",
-      filename: "3-2. 확약서.hwpx",
-      blob: doc3B,
-    },
+    ...doc3Documents.map((blob, index) => ({
+      label: `3-${index + 1}. 확약서`,
+      filename: `3-${index + 1}. 확약서.hwpx`,
+      blob,
+    })),
     {
       label: "4. 실시간쌍방향 연수 심의결과서",
       filename: "4. 실시간쌍방향 연수 심의결과서.hwpx",
@@ -88,6 +92,22 @@ export function buildConsentFormTitle(trainingDate: string): string {
 export function buildEvaluationFormTitle(trainingDate: string): string {
   const date = parseTrainingDate(trainingDate);
   return `화상원격연수 평가서(${date.month}.${date.day}.)`;
+}
+
+export function buildPreliminaryAssetFolderName(
+  trainingDate: string,
+  trainingIndex: number,
+  trainings: PreliminaryTrainingSet[],
+): string {
+  const baseName = buildPreliminaryFolderName(trainingDate);
+  const sameDateCount = trainings.filter((training) => {
+    try {
+      return buildPreliminaryFolderName(training.trainingDate) === baseName;
+    } catch {
+      return false;
+    }
+  }).length;
+  return sameDateCount > 1 ? `${baseName} - ${trainingIndex + 1}` : baseName;
 }
 
 export function parseTrainingDate(value: string): {

@@ -34,6 +34,8 @@ export type CaptureEvidenceRow = {
   mode: CaptureMode;
   cameraImage: CaptureEvidenceImage | null;
   chatImages: CaptureEvidenceImage[];
+  /** Links rows automatically created from one multi-image chat selection. */
+  chatImageBatchId?: string;
 };
 
 export type AttendancePerson = {
@@ -89,6 +91,12 @@ export type AttendanceDocumentBundle = {
   evaluation: EvaluationSummary | null;
   completionCount: number;
   incompleteCount: number;
+};
+
+export type HwpxPreliminaryTrainingRow = {
+  number: string;
+  name: string;
+  instructor?: string;
 };
 
 const HWPX_TEMPLATES = {
@@ -511,15 +519,62 @@ export function buildAttendanceFilename(form: AttendanceBaseForm, label: string,
 export async function createHwpxFromTemplateUrl(
   templateUrl: string,
   replacements: Record<string, string>,
+  options: { preliminaryTrainingRows?: HwpxPreliminaryTrainingRow[] } = {},
 ): Promise<Blob> {
   const response = await fetch(templateUrl);
   if (!response.ok) throw new Error("한글 문서 양식을 불러오지 못했습니다. 다시 시도해 주세요.");
   const files = await unzipArchive(new Uint8Array(await response.arrayBuffer()));
   let section = decodeUtf8(files["Contents/section0.xml"]);
+  if (options.preliminaryTrainingRows) {
+    section = renderPreliminaryTrainingTable(section, options.preliminaryTrainingRows);
+  }
   section = replaceTokensAndInvalidateLineSegments(section, replacements);
   files["Contents/section0.xml"] = encodeUtf8(section);
   updatePreviewText(files, section);
   return new Blob([await createZip(files)], { type: "application/x-hwpml-package" });
+}
+
+function renderPreliminaryTrainingTable(
+  section: string,
+  rows: HwpxPreliminaryTrainingRow[],
+): string {
+  if (!rows.length) throw new Error("사전 문서에 넣을 연수 정보가 없습니다.");
+
+  const firstToken = "{{연수1_연수명}}";
+  const secondToken = "{{연수2_연수명}}";
+  const firstTokenIndex = section.indexOf(firstToken);
+  const secondTokenIndex = section.indexOf(secondToken, firstTokenIndex + firstToken.length);
+  if (firstTokenIndex < 0 || secondTokenIndex < 0) {
+    throw new Error("사전 문서 양식의 연수 목록 표를 찾지 못했습니다.");
+  }
+
+  const firstRowStart = section.lastIndexOf("<hp:tr", firstTokenIndex);
+  const firstRowClose = section.indexOf("</hp:tr>", firstTokenIndex);
+  const secondRowStart = section.lastIndexOf("<hp:tr", secondTokenIndex);
+  const secondRowClose = section.indexOf("</hp:tr>", secondTokenIndex);
+  if (firstRowStart < 0 || firstRowClose < 0 || secondRowStart <= firstRowStart || secondRowClose < 0) {
+    throw new Error("사전 문서 양식의 연수 목록 행을 찾지 못했습니다.");
+  }
+
+  const firstRow = section.slice(firstRowStart, firstRowClose + "</hp:tr>".length);
+  const renderedRows = rows.map((row, index) => {
+    const numberedRow = replacePreliminaryTrainingRowNumber(firstRow, row.number);
+    return shiftTableRowAddresses(
+      replaceTokensAndInvalidateLineSegments(numberedRow, {
+        "연수1_연수명": row.name,
+        "연수1_강사": row.instructor ?? "",
+      }),
+      index,
+    );
+  }).join("");
+  const rowDelta = rows.length - 2;
+  const prefix = updateLastTableRowCount(section.slice(0, firstRowStart), rowDelta);
+  const suffix = section.slice(secondRowClose + "</hp:tr>".length);
+  return `${prefix}${renderedRows}${suffix}`;
+}
+
+function replacePreliminaryTrainingRowNumber(row: string, number: string): string {
+  return row.replace(/(<hp:t>)1(<\/hp:t>)/, `$1${escapeXml(number)}$2`);
 }
 
 async function createHwpx(

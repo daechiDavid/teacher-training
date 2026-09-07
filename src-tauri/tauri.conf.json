@@ -27,7 +27,7 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "google-oauth.example.json"
+      "google-oauth.json"
     ],
     "icon": [
       "icons/32x32.png",

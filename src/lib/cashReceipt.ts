@@ -74,8 +74,8 @@ function fillCashReceiptSheet(sheetXml: string, phones: string[]): string {
     row.setAttribute("spans", "1:5");
     setNumberCell(doc, row, `A${rowNumber}`, "0");
     setTextCell(doc, row, `B${rowNumber}`, phone);
-    setTextCell(doc, row, `C${rowNumber}`, "50,000");
-    setTextCell(doc, row, `D${rowNumber}`, "50,000");
+    setTextCell(doc, row, `C${rowNumber}`, "50000");
+    setTextCell(doc, row, `D${rowNumber}`, "50000");
     setTextCell(doc, row, `E${rowNumber}`, "0");
     sheetData.appendChild(row);
   });

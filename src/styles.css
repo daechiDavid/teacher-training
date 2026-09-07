@@ -514,11 +514,36 @@ tr[data-status="excluded"] {
   padding: 14px;
 }
 
+.preliminary-training-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
 .preliminary-training-section h3 {
   color: #111827;
   font-size: 15px;
   line-height: 1.3;
   margin: 0;
+}
+
+.preliminary-training-remove,
+.preliminary-training-add {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.preliminary-training-remove {
+  min-height: 44px;
+  padding: 0 10px;
+}
+
+.preliminary-training-add {
+  justify-self: start;
+  min-height: 44px;
 }
 
 .preliminary-training-grid {

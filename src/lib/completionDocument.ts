@@ -126,7 +126,13 @@ function fillTemplateSheet(sheetXml: string, rows: CompletionDocumentRow[]): str
   const dataRowsNeeded = Math.max(rows.length, 0);
   const existingRows = Array.from(sheetData.getElementsByTagNameNS(SPREADSHEET_NS, "row"));
   const templateRow = existingRows.find((row) => row.getAttribute("r") === "2") ?? existingRows[1];
-  const totalRows = Math.max(existingRows.length, dataRowsNeeded + 1);
+  if (!templateRow) throw new Error("이수자 명단 양식의 데이터 행 서식을 찾지 못했습니다.");
+
+  existingRows
+    .filter((row) => Number(row.getAttribute("r") || "0") >= 2)
+    .forEach((row) => sheetData.removeChild(row));
+
+  const totalRows = Math.max(1, dataRowsNeeded + 1);
   for (let rowNumber = 2; rowNumber <= totalRows; rowNumber += 1) {
     const rowElement = ensureRow(doc, sheetData, rowNumber, templateRow);
     const values = rows[rowNumber - 2] ? rowToValues(rows[rowNumber - 2]) : Array(COMPLETION_DOCUMENT_HEADERS.length).fill("");

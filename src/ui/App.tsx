@@ -1,15 +1,15 @@
-import {
-  AlertCircle,
-  ArrowLeft,
-  CheckCircle2,
-  Download,
-  FileSpreadsheet,
-  FolderUp,
-  LockKeyhole,
-  ReceiptText,
-  Settings,
-  UploadCloud,
-} from "lucide-react";
+import AlertCircle from "lucide-react/dist/esm/icons/alert-circle.js";
+import ArrowLeft from "lucide-react/dist/esm/icons/arrow-left.js";
+import CheckCircle2 from "lucide-react/dist/esm/icons/circle-check.js";
+import Download from "lucide-react/dist/esm/icons/download.js";
+import FileSpreadsheet from "lucide-react/dist/esm/icons/file-spreadsheet.js";
+import FolderUp from "lucide-react/dist/esm/icons/folder-up.js";
+import LockKeyhole from "lucide-react/dist/esm/icons/lock-keyhole.js";
+import Plus from "lucide-react/dist/esm/icons/plus.js";
+import ReceiptText from "lucide-react/dist/esm/icons/receipt-text.js";
+import Settings from "lucide-react/dist/esm/icons/settings.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
+import UploadCloud from "lucide-react/dist/esm/icons/cloud-upload.js";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { useEffect, useMemo, useState } from "react";
@@ -88,10 +88,11 @@ import { generateReceiptPdf, todayLocalDate } from "../lib/receipt";
 import {
   buildConsentFormTitle,
   buildEvaluationFormTitle,
-  buildPreliminaryFolderName,
+  buildPreliminaryAssetFolderName,
   createPreliminaryDocuments,
   parseTrainingDate,
   PreliminaryDocumentForm,
+  PreliminaryTrainingSet,
 } from "../lib/preDocuments";
 
 type LoadedFileState = {
@@ -195,36 +196,60 @@ type PreliminaryDownloadState = {
 };
 
 type PreliminaryImageSet = {
+  id?: string;
   lectureDescription: File | null;
   instructorIntro: File | null;
 };
 
-type PreliminaryImageForm = {
-  training1: PreliminaryImageSet;
-  training2: PreliminaryImageSet;
-};
+type PreliminaryImageForm = PreliminaryImageSet[];
+type PreliminaryImageKey = "lectureDescription" | "instructorIntro";
 
-function createEmptyCaptureEvidenceRow(): CaptureEvidenceRow {
+const CHAT_IMAGES_PER_EVIDENCE_ROW = 4;
+
+function createPreliminaryRowId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function createEmptyPreliminaryTraining(id = createPreliminaryRowId()): PreliminaryTrainingSet {
+  return { id, trainingName: "", trainingDate: "", instructorName: "" };
+}
+
+function createEmptyPreliminaryImages(id: string): PreliminaryImageSet {
+  return { id, lectureDescription: null, instructorIntro: null };
+}
+
+function createEmptyCaptureEvidenceRow(
+  defaults: Partial<Pick<CaptureEvidenceRow, "period" | "mode" | "cameraImage" | "chatImages" | "chatImageBatchId">> = {},
+): CaptureEvidenceRow {
   return {
     id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
     period: 1,
     mode: "camera",
     cameraImage: null,
     chatImages: [],
+    ...defaults,
   };
+}
+
+function splitIntoEvidenceRows(images: CaptureEvidenceImage[]): CaptureEvidenceImage[][] {
+  const rows: CaptureEvidenceImage[][] = [];
+  for (let index = 0; index < images.length; index += CHAT_IMAGES_PER_EVIDENCE_ROW) {
+    rows.push(images.slice(index, index + CHAT_IMAGES_PER_EVIDENCE_ROW));
+  }
+  return rows;
 }
 
 export function App() {
   const [step, setStep] = useState<WorkflowStep>("upload");
   const [activeTask, setActiveTask] = useState<ActiveTask>(null);
-  const [preliminaryForm, setPreliminaryForm] = useState<PreliminaryDocumentForm>({
-    training1: { trainingName: "", trainingDate: "", instructorName: "" },
-    training2: { trainingName: "", trainingDate: "", instructorName: "" },
+  const [preliminaryForm, setPreliminaryForm] = useState<PreliminaryDocumentForm>(() => {
+    const firstId = createPreliminaryRowId();
+    const secondId = createPreliminaryRowId();
+    return { trainings: [createEmptyPreliminaryTraining(firstId), createEmptyPreliminaryTraining(secondId)] };
   });
-  const [preliminaryImages, setPreliminaryImages] = useState<PreliminaryImageForm>({
-    training1: { lectureDescription: null, instructorIntro: null },
-    training2: { lectureDescription: null, instructorIntro: null },
-  });
+  const [preliminaryImages, setPreliminaryImages] = useState<PreliminaryImageForm>(() =>
+    preliminaryForm.trainings.map((training) => createEmptyPreliminaryImages(training.id ?? createPreliminaryRowId())),
+  );
   const [preliminaryDocuments, setPreliminaryDocuments] = useState<GeneratedDocument[]>([]);
   const [preliminaryAssets, setPreliminaryAssets] = useState<PreliminaryGoogleAssetsState | null>(null);
   const [preliminaryDownload, setPreliminaryDownload] = useState<PreliminaryDownloadState>({ status: "idle", folderPath: "" });
@@ -296,6 +321,10 @@ export function App() {
     () => results.filter((result) => result.status === "eligible"),
     [results],
   );
+  const receiptEligibleResults = useMemo(
+    () => eligibleResults.filter((result) => result.completion.niceNumber !== "없음"),
+    [eligibleResults],
+  );
   const manualReviewResults = useMemo(
     () => results.filter((result) => result.status === "manual-review"),
     [results],
@@ -303,11 +332,11 @@ export function App() {
   const summary = useMemo(
     () => ({
       completed: completionRows.length,
-      eligible: eligibleResults.length,
+      eligible: receiptEligibleResults.length,
       manual: manualReviewResults.length + rosterIssues.length,
       excluded: results.filter((result) => result.status === "excluded").length,
     }),
-    [completionRows.length, eligibleResults.length, manualReviewResults.length, results, rosterIssues.length],
+    [completionRows.length, manualReviewResults.length, receiptEligibleResults.length, results, rosterIssues.length],
   );
   const documentIssues = useMemo(
     () => validateCompletionNiceNumbers(documentRows),
@@ -315,7 +344,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (step !== "issue" || !eligibleResults[0] || !completionSheetForm.trainingDate.trim()) {
+    if (step !== "issue" || !receiptEligibleResults[0] || !completionSheetForm.trainingDate.trim()) {
       setSamplePdfUrl((current) => {
         if (current) URL.revokeObjectURL(current);
         return null;
@@ -325,7 +354,7 @@ export function App() {
 
     let cancelled = false;
     async function createSample() {
-      const first = eligibleResults[0];
+      const first = receiptEligibleResults[0];
       if (!first || first.status !== "eligible") return;
       const pdfBytes = await generateReceiptPdf({
         completion: first.completion,
@@ -348,7 +377,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [completionSheetForm.trainingDate, eligibleResults, step]);
+  }, [completionSheetForm.trainingDate, receiptEligibleResults, step]);
 
   async function refreshGoogleStatus(options?: { initialize?: boolean }) {
     const status = await getGoogleConfigStatus();
@@ -437,6 +466,37 @@ export function App() {
     }
   }
 
+  function addPreliminaryTraining() {
+    const id = createPreliminaryRowId();
+    setPreliminaryForm((current) => ({
+      trainings: [...current.trainings, createEmptyPreliminaryTraining(id)],
+    }));
+    setPreliminaryImages((current) => [...current, createEmptyPreliminaryImages(id)]);
+    setPreliminaryAssets(null);
+    setPreliminaryDocuments([]);
+    setPreliminaryDownload({ status: "idle", folderPath: "" });
+  }
+
+  function removePreliminaryTraining(index: number) {
+    setPreliminaryForm((current) => {
+      if (current.trainings.length <= 1 || !current.trainings[index]) return current;
+      const id = current.trainings[index].id;
+      return {
+        trainings: current.trainings.filter((training, trainingIndex) =>
+          id ? training.id !== id : trainingIndex !== index,
+        ),
+      };
+    });
+    setPreliminaryImages((current) => {
+      if (current.length <= 1 || !current[index]) return current;
+      const id = current[index].id;
+      return current.filter((image, imageIndex) => id ? image.id !== id : imageIndex !== index);
+    });
+    setPreliminaryAssets(null);
+    setPreliminaryDocuments([]);
+    setPreliminaryDownload({ status: "idle", folderPath: "" });
+  }
+
   async function generatePreliminaryAssets() {
     setError(null);
     setNotice(null);
@@ -449,14 +509,13 @@ export function App() {
       validatePreliminaryImages(preliminaryImages);
       const documents = await createPreliminaryDocuments(preliminaryForm);
       if (!googleStatus?.drive_parent_folder_id) throw new Error("기본 설정에서 작업 루트 폴더를 먼저 저장하세요.");
-      const trainingImageInputs = [preliminaryImages.training1, preliminaryImages.training2];
-      const assetsByTraining = await Promise.all([preliminaryForm.training1, preliminaryForm.training2].map(async (training, index) => {
+      const assetsByTraining = await Promise.all(preliminaryForm.trainings.map(async (training, index) => {
         const formTitle = buildConsentFormTitle(training.trainingDate);
         const evaluationFormTitle = buildEvaluationFormTitle(training.trainingDate);
-        const images = await buildPreliminaryFormImages(trainingImageInputs[index]);
+        const images = await buildPreliminaryFormImages(preliminaryImages[index]);
         return createPreliminaryGoogleAssets({
           rootFolderId: googleStatus.drive_parent_folder_id,
-          folderName: buildPreliminaryFolderName(training.trainingDate),
+          folderName: buildPreliminaryAssetFolderName(training.trainingDate, index, preliminaryForm.trainings),
           formTemplateId: "1Hz1l6bF2ikqp0It9FSx3m0OgwdaIZxQBzYsl3lS0QHo",
           formTitle,
           evaluationFormTemplateId: "14ygBdjHn5U7KBi3dFhXikcsbu-cckJNdtKeOmz5oQR8",
@@ -467,7 +526,7 @@ export function App() {
       setPreliminaryDocuments(documents);
       setPreliminaryAssets({
         items: assetsByTraining.map((assets, index) => ({
-          label: `${index + 1}. ${index === 0 ? preliminaryForm.training1.trainingName : preliminaryForm.training2.trainingName}`,
+          label: `${index + 1}. ${preliminaryForm.trainings[index].trainingName}`,
           folderUrl: buildDriveFolderUrl(assets.folder_id),
           formUrl: assets.form_url,
           evaluationFormUrl: assets.evaluation_form_url,
@@ -705,6 +764,7 @@ export function App() {
       const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, rows);
       const nextSummaryRows = buildSummaryRows(nextCaptureRows, rows);
       setZoomRows(rows);
+      setCaptureRows(nextCaptureRows);
       setSummaryRows(nextSummaryRows);
       setZoomFile({ name: file.name, rowCount: rows.length, missingHeaders: [] });
       clearCurrentDocument();
@@ -727,7 +787,7 @@ export function App() {
     try {
       const applied = await applyZoomChatAttendanceText(file, captureRows, documentForm);
       const nextSummaryCaptureRows = applyRecognizedZoomRowsToCaptureRows(applied.rows, zoomRows);
-      setCaptureRows(applied.rows);
+      setCaptureRows(nextSummaryCaptureRows);
       setSummaryRows(zoomRows.length ? buildSummaryRows(nextSummaryCaptureRows, zoomRows) : []);
       setZoomChatFile({
         name: file.name,
@@ -767,15 +827,43 @@ export function App() {
 
   async function loadCaptureEvidenceImages(id: string, kind: "camera" | "chat", files: FileList | null) {
     if (!files) return;
-    const images: CaptureEvidenceImage[] = await Promise.all(Array.from(files).slice(0, kind === "camera" ? 1 : 4).map(async (file) => ({
+    const selectedFiles = Array.from(files);
+    if (!selectedFiles.length) return;
+    const images: CaptureEvidenceImage[] = await Promise.all(selectedFiles.slice(0, kind === "camera" ? 1 : undefined).map(async (file) => ({
       name: file.name.replace(/\.[^.]+$/, ".jpg"),
       dataUrl: await resizeImageFileForHwpx(file, kind),
     })));
-    setCaptureEvidenceRows((current) => current.map((row) => {
-      if (row.id !== id) return row;
-      return kind === "camera" ? { ...row, cameraImage: images[0] ?? null } : { ...row, chatImages: images };
-    }));
+    const chatImageGroups = kind === "chat" ? splitIntoEvidenceRows(images) : [];
+    setCaptureEvidenceRows((current) => {
+      const targetIndex = current.findIndex((row) => row.id === id);
+      if (targetIndex < 0) return current;
+
+      const target = current[targetIndex];
+      if (kind === "camera") {
+        return current.map((row) => row.id === id ? { ...row, cameraImage: images[0] ?? null } : row);
+      }
+
+      const [firstGroup = [], ...followingGroups] = chatImageGroups;
+      const batchId = target.chatImageBatchId ?? target.id;
+      const retainedRows = current.filter((row) => row.id === id || row.chatImageBatchId !== batchId);
+      const retainedTargetIndex = retainedRows.findIndex((row) => row.id === id);
+      const insertedRows = followingGroups.map((chatImages) => createEmptyCaptureEvidenceRow({
+        period: target.period,
+        mode: "chat",
+        chatImages,
+        chatImageBatchId: batchId,
+      }));
+      return [
+        ...retainedRows.slice(0, retainedTargetIndex),
+        { ...target, cameraImage: null, chatImages: firstGroup, chatImageBatchId: batchId },
+        ...insertedRows,
+        ...retainedRows.slice(retainedTargetIndex + 1),
+      ];
+    });
     clearCurrentDocument();
+    if (kind === "chat" && chatImageGroups.length > 1) {
+      setNotice(`채팅 이미지 ${images.length}장을 ${chatImageGroups.length}개 증빙 행으로 나누어 넣었습니다. 각 행에는 최대 4장씩 들어갑니다.`);
+    }
   }
 
   function updateCaptureEvidenceRow(id: string, patch: Partial<Pick<CaptureEvidenceRow, "period" | "mode">>) {
@@ -783,7 +871,7 @@ export function App() {
       if (row.id !== id) return row;
       const next = { ...row, ...patch };
       if (patch.mode && patch.mode !== row.mode) {
-        return { ...next, cameraImage: null, chatImages: [] };
+        return { ...next, cameraImage: null, chatImages: [], chatImageBatchId: undefined };
       }
       return next;
     }));
@@ -831,6 +919,9 @@ export function App() {
   function moveToDocumentStep(step: DocumentWorkflowStep) {
     clearCurrentDocument();
     setDocumentWorkflowStep(step);
+    if (step === "doc1") {
+      setCaptureRows((current) => applyRecognizedZoomRowsToCaptureRows(current, zoomRows));
+    }
     if (step === "doc3") {
       const nextCaptureRows = applyRecognizedZoomRowsToCaptureRows(captureRows, zoomRows);
       setSummaryRows(buildSummaryRows(nextCaptureRows, zoomRows));
@@ -1035,8 +1126,8 @@ export function App() {
     setIssueCompletion(null);
     setIssueProgress({
       current: 0,
-      total: eligibleResults.length,
-      label: eligibleResults.length ? "영수증 파일 저장을 준비 중입니다." : "전체명단 이수 기록을 준비 중입니다.",
+      total: receiptEligibleResults.length,
+      label: receiptEligibleResults.length ? "영수증 파일 저장을 준비 중입니다." : "전체명단 이수 기록을 준비 중입니다.",
     });
     setBusy(true);
     try {
@@ -1053,13 +1144,13 @@ export function App() {
       if (completionRecordUpdates.length) {
         setIssueProgress({
           current: 0,
-          total: eligibleResults.length,
+          total: receiptEligibleResults.length,
           label: "전체명단 이수 기록 중",
         });
         await batchUpdateSheet(completionRecordUpdates);
       }
 
-      for (const [index, result] of eligibleResults.entries()) {
+      for (const [index, result] of receiptEligibleResults.entries()) {
         const trainingName = result.completion.trainingName;
         const trainingId = `${trainingName}_${issuedDate}`;
         const logPersonKey = `${result.completion.name}_${result.completion.phone}`;
@@ -1069,7 +1160,7 @@ export function App() {
         try {
           setIssueProgress({
             current: index,
-            total: eligibleResults.length,
+            total: receiptEligibleResults.length,
             label: `${result.completion.name} 영수증 만드는 중`,
           });
           if (!folder) {
@@ -1085,14 +1176,14 @@ export function App() {
           });
           setIssueProgress({
             current: index,
-            total: eligibleResults.length,
+            total: receiptEligibleResults.length,
             label: `${result.completion.name} 영수증 저장 중`,
           });
           uploaded = await uploadPdfToDrive(folder.id, result.receiptFilename, Array.from(pdfBytes));
           const nextIssueCount = result.roster.issueCount + 1;
           setIssueProgress({
             current: index,
-            total: eligibleResults.length,
+            total: receiptEligibleResults.length,
             label: `${result.completion.name} 전체명단 기록 중`,
           });
           await batchUpdateSheet([
@@ -1119,8 +1210,8 @@ export function App() {
           });
           setIssueProgress({
             current: index + 1,
-            total: eligibleResults.length,
-            label: `${index + 1}/${eligibleResults.length}건 완료`,
+            total: receiptEligibleResults.length,
+            label: `${index + 1}/${receiptEligibleResults.length}건 완료`,
           });
         } catch (itemError) {
           await writeJobLog({
@@ -1138,7 +1229,7 @@ export function App() {
       }
       await loadRosterFromGoogle();
       setIssueCompletion({
-        count: eligibleResults.length,
+        count: receiptEligibleResults.length,
         rosterUrl: buildGoogleSheetUrl(googleStatus.spreadsheet_id),
         folderLinks: Array.from(folderByTraining.values()).map((folder) => ({
           name: folder.name,
@@ -1195,6 +1286,8 @@ export function App() {
           onBack={returnToMenu}
           onFormChange={setPreliminaryForm}
           onImagesChange={setPreliminaryImages}
+          onAddTraining={addPreliminaryTraining}
+          onRemoveTraining={removePreliminaryTraining}
           onCreate={generatePreliminaryAssets}
           onSaveDocuments={savePreliminaryDocuments}
           onOpenLink={openGeneratedLink}
@@ -1301,13 +1394,13 @@ export function App() {
             <StepCard
               icon={<FolderUp />}
               title="영수증 저장 및 기록"
-              description={eligibleResults.length ? "첫 번째 대상자의 샘플 영수증을 확인한 뒤 전체 영수증 저장과 전체명단 기록을 실행합니다." : "이미 영수증이 발급된 대상은 PDF 생성을 생략하고 전체명단의 이수 기록만 반영합니다."}
+              description={receiptEligibleResults.length ? "첫 번째 대상자의 샘플 영수증을 확인한 뒤 전체 영수증 저장과 전체명단 기록을 실행합니다." : "신규 영수증 발급 대상이 없어 PDF 생성을 생략하고 전체명단의 이수 기록만 반영합니다."}
             >
               {issueCompletion ? (
                 <IssueCompletionPanel completion={issueCompletion} onReset={resetToUpload} />
               ) : (
                 <>
-                  {eligibleResults.length ? (
+                  {receiptEligibleResults.length ? (
                     <div className="notice">
                       <UploadCloud size={18} />
                       저장된 영수증은 링크가 있는 사용자만 볼 수 있도록 공유됩니다.
@@ -1319,8 +1412,8 @@ export function App() {
                     </div>
                   )}
                   {issueProgress ? <IssueProgress progress={issueProgress} /> : null}
-                  {eligibleResults.length ? (
-                    <SamplePreview samplePdfUrl={samplePdfUrl} firstName={eligibleResults[0]?.completion.name} />
+                  {receiptEligibleResults.length ? (
+                    <SamplePreview samplePdfUrl={samplePdfUrl} firstName={receiptEligibleResults[0]?.completion.name} />
                   ) : null}
                   <div className="action-row">
                     <button className="secondary-action" type="button" onClick={() => setStep("review")} disabled={busy}>
@@ -1330,9 +1423,9 @@ export function App() {
                       className="primary-action"
                       type="button"
                       onClick={generateUploadAndRecord}
-                      disabled={busy || !completionRows.length || (eligibleResults.length > 0 && !samplePdfUrl) || !completionSheetForm.trainingDate.trim()}
+                      disabled={busy || !completionRows.length || (receiptEligibleResults.length > 0 && !samplePdfUrl) || !completionSheetForm.trainingDate.trim()}
                     >
-                      {eligibleResults.length ? "샘플 이상 없음 · 전체 저장 시작" : "전체명단 이수 기록만 반영"}
+                      {receiptEligibleResults.length ? "샘플 이상 없음 · 전체 저장 시작" : "전체명단 이수 기록만 반영"}
                     </button>
                   </div>
                 </>
@@ -1349,6 +1442,8 @@ function applyRecognizedZoomRowsToCaptureRows(
   captureRows: CaptureAttendanceRow[],
   zoomRows: ZoomAttendanceRow[],
 ): CaptureAttendanceRow[] {
+  // 2번 줌 접속기록에서 인정된 수강생은 1번 채팅 출결과 무관하게
+  // 두 교시 모두 O/인정으로 유지한다. 미인정 수강생은 채팅 반영 결과를 그대로 둔다.
   const recognizedKeys = new Set(
     zoomRows
       .filter((row) => row.result === "인정")
@@ -1584,6 +1679,8 @@ function PreliminaryDocumentStage({
   onBack,
   onFormChange,
   onImagesChange,
+  onAddTraining,
+  onRemoveTraining,
   onCreate,
   onSaveDocuments,
   onOpenLink,
@@ -1597,6 +1694,8 @@ function PreliminaryDocumentStage({
   onBack: () => void;
   onFormChange: (value: PreliminaryDocumentForm) => void;
   onImagesChange: (value: PreliminaryImageForm) => void;
+  onAddTraining: () => void;
+  onRemoveTraining: (index: number) => void;
   onCreate: () => void;
   onSaveDocuments: () => void;
   onOpenLink: (url: string) => void;
@@ -1618,6 +1717,8 @@ function PreliminaryDocumentStage({
           busy={busy}
           onChange={onFormChange}
           onImagesChange={onImagesChange}
+          onAddTraining={onAddTraining}
+          onRemoveTraining={onRemoveTraining}
         />
         <button
           className="primary-action"
@@ -1639,7 +1740,7 @@ function PreliminaryDocumentStage({
                 disabled={busy}
               >
                 {downloadState.status === "done" ? <CheckCircle2 size={17} /> : <Download size={17} />}
-                {downloadState.status === "done" ? "다운로드 완료" : "한글 문서 4개 한 번에 저장"}
+                {downloadState.status === "done" ? "다운로드 완료" : `한글 문서 ${documents.length}개 한 번에 저장`}
               </button>
             </div>
             {downloadState.status === "done" ? (
@@ -1678,130 +1779,112 @@ function PreliminaryFormView({
   busy,
   onChange,
   onImagesChange,
+  onAddTraining,
+  onRemoveTraining,
 }: {
   value: PreliminaryDocumentForm;
   images: PreliminaryImageForm;
   busy: boolean;
   onChange: (value: PreliminaryDocumentForm) => void;
   onImagesChange: (value: PreliminaryImageForm) => void;
+  onAddTraining: () => void;
+  onRemoveTraining: (index: number) => void;
 }) {
   const updateImage = (
-    trainingKey: keyof PreliminaryImageForm,
-    imageKey: keyof PreliminaryImageSet,
+    trainingIndex: number,
+    imageKey: PreliminaryImageKey,
     file: File | null,
   ) => {
-    onImagesChange({
-      ...images,
-      [trainingKey]: {
-        ...images[trainingKey],
-        [imageKey]: file,
-      },
-    });
+    onImagesChange(images.map((image, index) => index === trainingIndex
+      ? { ...image, [imageKey]: file }
+      : image));
   };
 
   return (
     <div className="preliminary-training-list">
-      <section className="preliminary-training-section">
-        <h3>연수 1</h3>
-        <div className="settings-form preliminary-training-grid">
-          <label>
-            <span>연수명</span>
-            <input
-              value={value.training1.trainingName}
-              onChange={(event) => onChange({ ...value, training1: { ...value.training1, trainingName: event.target.value } })}
-              disabled={busy}
-            />
-          </label>
-          <label>
-            <span>날짜</span>
-            <input
-              type="date"
-              value={value.training1.trainingDate}
-              onChange={(event) => onChange({ ...value, training1: { ...value.training1, trainingDate: event.target.value } })}
-              disabled={busy}
-            />
-          </label>
-          <label>
-            <span>강사명</span>
-            <input
-              value={value.training1.instructorName}
-              onChange={(event) => onChange({ ...value, training1: { ...value.training1, instructorName: event.target.value } })}
-              disabled={busy}
-            />
-          </label>
-          <label className="file-picker">
-            <span>강의설명 이미지</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(event) => updateImage("training1", "lectureDescription", event.target.files?.[0] ?? null)}
-              disabled={busy}
-            />
-            <strong>{images.training1.lectureDescription?.name ?? "선택된 파일 없음"}</strong>
-          </label>
-          <label className="file-picker">
-            <span>강사소개 이미지</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(event) => updateImage("training1", "instructorIntro", event.target.files?.[0] ?? null)}
-              disabled={busy}
-            />
-            <strong>{images.training1.instructorIntro?.name ?? "선택된 파일 없음"}</strong>
-          </label>
-        </div>
-      </section>
-
-      <section className="preliminary-training-section">
-        <h3>연수 2</h3>
-        <div className="settings-form preliminary-training-grid">
-          <label>
-            <span>연수명</span>
-            <input
-              value={value.training2.trainingName}
-              onChange={(event) => onChange({ ...value, training2: { ...value.training2, trainingName: event.target.value } })}
-              disabled={busy}
-            />
-          </label>
-          <label>
-            <span>날짜</span>
-            <input
-              type="date"
-              value={value.training2.trainingDate}
-              onChange={(event) => onChange({ ...value, training2: { ...value.training2, trainingDate: event.target.value } })}
-              disabled={busy}
-            />
-          </label>
-          <label>
-            <span>강사명</span>
-            <input
-              value={value.training2.instructorName}
-              onChange={(event) => onChange({ ...value, training2: { ...value.training2, instructorName: event.target.value } })}
-              disabled={busy}
-            />
-          </label>
-          <label className="file-picker">
-            <span>강의설명 이미지</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(event) => updateImage("training2", "lectureDescription", event.target.files?.[0] ?? null)}
-              disabled={busy}
-            />
-            <strong>{images.training2.lectureDescription?.name ?? "선택된 파일 없음"}</strong>
-          </label>
-          <label className="file-picker">
-            <span>강사소개 이미지</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(event) => updateImage("training2", "instructorIntro", event.target.files?.[0] ?? null)}
-              disabled={busy}
-            />
-            <strong>{images.training2.instructorIntro?.name ?? "선택된 파일 없음"}</strong>
-          </label>
-        </div>
-      </section>
+      {value.trainings.map((training, index) => {
+        const image = images[index] ?? { lectureDescription: null, instructorIntro: null };
+        const rowKey = training.id ?? image.id ?? String(index);
+        return (
+          <section className="preliminary-training-section" key={rowKey}>
+            <div className="preliminary-training-heading">
+              <h3>연수 {index + 1}</h3>
+              <button
+                className="secondary-action preliminary-training-remove"
+                type="button"
+                onClick={() => onRemoveTraining(index)}
+                disabled={busy || value.trainings.length <= 1}
+              >
+                <Trash2 size={16} />
+                연수 삭제
+              </button>
+            </div>
+            <div className="settings-form preliminary-training-grid">
+              <label>
+                <span>연수명</span>
+                <input
+                  value={training.trainingName}
+                  onChange={(event) => onChange({
+                    trainings: value.trainings.map((current, currentIndex) => currentIndex === index
+                      ? { ...current, trainingName: event.target.value }
+                      : current),
+                  })}
+                  disabled={busy}
+                />
+              </label>
+              <label>
+                <span>날짜</span>
+                <input
+                  type="date"
+                  value={training.trainingDate}
+                  onChange={(event) => onChange({
+                    trainings: value.trainings.map((current, currentIndex) => currentIndex === index
+                      ? { ...current, trainingDate: event.target.value }
+                      : current),
+                  })}
+                  disabled={busy}
+                />
+              </label>
+              <label>
+                <span>강사명</span>
+                <input
+                  value={training.instructorName}
+                  onChange={(event) => onChange({
+                    trainings: value.trainings.map((current, currentIndex) => currentIndex === index
+                      ? { ...current, instructorName: event.target.value }
+                      : current),
+                  })}
+                  disabled={busy}
+                />
+              </label>
+              <label className="file-picker">
+                <span>강의설명 이미지</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => updateImage(index, "lectureDescription", event.target.files?.[0] ?? null)}
+                  disabled={busy}
+                />
+                <strong>{image.lectureDescription?.name ?? "선택된 파일 없음"}</strong>
+              </label>
+              <label className="file-picker">
+                <span>강사소개 이미지</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => updateImage(index, "instructorIntro", event.target.files?.[0] ?? null)}
+                  disabled={busy}
+                />
+                <strong>{image.instructorIntro?.name ?? "선택된 파일 없음"}</strong>
+              </label>
+            </div>
+          </section>
+        );
+      })}
+      <button className="secondary-action preliminary-training-add" type="button" onClick={onAddTraining} disabled={busy}>
+        <Plus size={17} />
+        연수 추가
+      </button>
     </div>
   );
 }
@@ -2275,7 +2358,7 @@ function CaptureControls({
                 <option value="chat">채팅화면</option>
               </select>
               <label className="file-picker">
-                {evidenceRow.mode === "camera" ? "캠 이미지 1개" : "채팅 이미지 최대 4개"}
+                {evidenceRow.mode === "camera" ? "캠 이미지 1개" : "채팅 이미지 여러 장 (4개씩 자동 행 추가)"}
                 <input
                   type="file"
                   accept="image/*"
@@ -2888,11 +2971,17 @@ function ResultTable({ results }: { results: ReturnType<typeof matchRecipients> 
         <tbody>
           {results.map((result, index) => (
             <tr key={`${result.completion.rowNumber}-${index}`} data-status={result.status}>
-              <td>{statusLabel(result.status)}</td>
+              <td>{result.status === "eligible" && result.completion.niceNumber === "없음" ? "이수 기록만" : statusLabel(result.status)}</td>
               <td>{result.completion.name}</td>
               <td>{result.completion.school}</td>
               <td>{result.completion.trainingName}</td>
-              <td>{result.status === "eligible" ? result.receiptFilename : result.reason}</td>
+              <td>
+                {result.status === "eligible"
+                  ? result.completion.niceNumber === "없음"
+                    ? "영수증 미발급 · 전체명단에 O만 기록"
+                    : result.receiptFilename
+                  : result.reason}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -2902,51 +2991,39 @@ function ResultTable({ results }: { results: ReturnType<typeof matchRecipients> 
 }
 
 function isPreliminaryFormReady(form: PreliminaryDocumentForm): boolean {
-  return Boolean(
-    form.training1.trainingName.trim()
-      && form.training1.trainingDate.trim()
-      && form.training1.instructorName.trim()
-      && form.training2.trainingName.trim()
-      && form.training2.trainingDate.trim()
-      && form.training2.instructorName.trim(),
-  );
+  return form.trainings.length > 0 && form.trainings.every((training) => Boolean(
+    training.trainingName.trim()
+      && training.trainingDate.trim()
+      && training.instructorName.trim(),
+  ));
 }
 
 function isPreliminaryImageFormReady(images: PreliminaryImageForm): boolean {
-  return Boolean(
-    images.training1.lectureDescription
-      && images.training1.instructorIntro
-      && images.training2.lectureDescription
-      && images.training2.instructorIntro,
-  );
+  return images.length > 0 && images.every((image) => Boolean(
+    image.lectureDescription && image.instructorIntro,
+  ));
 }
 
 function validatePreliminaryForm(form: PreliminaryDocumentForm) {
   if (!isPreliminaryFormReady(form)) {
-    throw new Error("연수명 2개, 연수 날짜 2개, 강사명 2개를 모두 입력하세요.");
+    throw new Error("각 연수의 연수명, 연수 날짜, 강사명을 모두 입력하세요.");
   }
-  parseTrainingDate(form.training1.trainingDate);
-  parseTrainingDate(form.training2.trainingDate);
+  form.trainings.forEach((training) => parseTrainingDate(training.trainingDate));
 }
 
 function validatePreliminaryImages(images: PreliminaryImageForm) {
   if (!isPreliminaryImageFormReady(images)) {
-    throw new Error("연수 1과 연수 2의 강의설명 이미지, 강사소개 이미지를 모두 첨부하세요.");
+    throw new Error("각 연수의 강의설명 이미지와 강사소개 이미지를 모두 첨부하세요.");
   }
-  [
-    images.training1.lectureDescription,
-    images.training1.instructorIntro,
-    images.training2.lectureDescription,
-    images.training2.instructorIntro,
-  ].forEach((file) => {
+  images.flatMap((image) => [image.lectureDescription, image.instructorIntro]).forEach((file) => {
     if (!file?.type.startsWith("image/")) {
       throw new Error("설문에 첨부할 파일은 이미지 형식이어야 합니다.");
     }
   });
 }
 
-async function buildPreliminaryFormImages(images: PreliminaryImageSet) {
-  if (!images.lectureDescription || !images.instructorIntro) {
+async function buildPreliminaryFormImages(images: PreliminaryImageSet | undefined) {
+  if (!images?.lectureDescription || !images.instructorIntro) {
     throw new Error("강의설명 이미지와 강사소개 이미지를 모두 첨부하세요.");
   }
   return [
