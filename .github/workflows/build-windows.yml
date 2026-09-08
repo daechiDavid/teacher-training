@@ -46,31 +46,13 @@ jobs:
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText($oauthPath, $env:GOOGLE_OAUTH_JSON, $utf8NoBom)
 
-      - name: Enable VBScript for WiX MSI bundling
-        shell: pwsh
-        run: |
-          $vbscript = Get-WindowsCapability -Online |
-            Where-Object { $_.Name -like "VBSCRIPT*" } |
-            Select-Object -First 1
-          if ($null -eq $vbscript) {
-            throw "The Windows VBScript capability is not available on this runner."
-          }
-          if ($vbscript.State -ne "Installed") {
-            Add-WindowsCapability -Online -Name $vbscript.Name
-          }
-          $vbscript = Get-WindowsCapability -Online -Name $vbscript.Name
-          if ($vbscript.State -ne "Installed") {
-            throw "Could not enable the Windows VBScript capability. State: $($vbscript.State)"
-          }
-
-      - name: Build Tauri Windows installers
-        run: pnpm tauri build
+      # NSIS produces a Windows setup.exe without the WiX/light.exe MSI toolchain.
+      - name: Build Tauri Windows NSIS installer
+        run: pnpm tauri build --bundles nsis --verbose
 
       - name: Upload Windows installers
         uses: actions/upload-artifact@v4
         with:
           name: teacher-training-windows-installers
           if-no-files-found: error
-          path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*-setup.exe
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
