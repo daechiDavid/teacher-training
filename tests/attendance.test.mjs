@@ -25,7 +25,8 @@ registerHooks({
 const {
   buildDefaultCaptureRows, updateCaptureResult, applyZoomChatAttendanceText,
   applyRecognizedZoomRowsToCaptureRows: applyZoom, buildSummaryRows,
-  calculateEffectiveZoomMinutes,
+  calculateEffectiveZoomMinutes, calculateMergedEffectiveZoomMinutes,
+  parseZoomAttendanceWorkbook,
 } = await import('../src/lib/attendanceDocuments.ts');
 const people = ['김가람', '이보람', '박다솜'].map((name, index) => ({
   sequence: String(index + 1), name, niceNumber: '없음', schoolName: '테스트학교', source: {},
@@ -84,4 +85,73 @@ test('접속시간은 쉬는시간 10분만 제외하고 연수 구간 안에서
   assert.equal(calculateEffectiveZoomMinutes(start + 50, start + 60, start, end), 0);
   assert.equal(calculateEffectiveZoomMinutes(start + 55, start + 80, start, end), 20);
   assert.equal(calculateEffectiveZoomMinutes(start - 30, start + 20, start, end), 20);
+});
+
+test('다중 기기의 겹치는 접속 구간은 한 번만 계산', () => {
+  const start = 8 * 60;
+  const end = 9 * 60 + 50;
+  assert.equal(calculateMergedEffectiveZoomMinutes([
+    [start, start + 30],
+    [start + 20, start + 50],
+  ], start, end), 50);
+  assert.equal(calculateMergedEffectiveZoomMinutes([
+    [start, start + 50],
+    [start + 10, start + 20],
+  ], start, end), 50);
+  assert.equal(calculateMergedEffectiveZoomMinutes([
+    [start, start + 20],
+    [start + 30, start + 50],
+  ], start, end), 40);
+});
+
+test('병합된 접속 구간에서도 쉬는시간은 한 번만 제외', () => {
+  const start = 20 * 60;
+  const end = 21 * 60 + 50;
+  assert.equal(calculateMergedEffectiveZoomMinutes([
+    [start + 40, start + 70],
+    [start + 45, start + 65],
+  ], start, end), 20);
+});
+
+test('자정을 넘는 다중 접속 구간도 중복 없이 계산', () => {
+  const start = 23 * 60 + 30;
+  const end = 1 * 60 + 20;
+  assert.equal(calculateMergedEffectiveZoomMinutes([
+    [23 * 60 + 40, 20],
+    [23 * 60 + 50, 40],
+  ], start, end), 50);
+});
+
+test('CSV 처리 경로에서 겹치는 기기 접속을 병합하고 경고 표시', async () => {
+  const headers = Array.from({ length: 24 }, (_, index) => `열${index + 1}`);
+  headers[16] = '이름(원래 이름)';
+  headers[18] = '참가 시간';
+  headers[19] = '나간 시간';
+  headers[20] = '기간(분)';
+  const makeRow = (entry, exit) => {
+    const row = Array(24).fill('');
+    row[16] = '홍길동_테스트학교';
+    row[18] = entry;
+    row[19] = exit;
+    row[20] = '30';
+    return row;
+  };
+  const csv = [
+    headers,
+    makeRow('2026/09/10 08:00:00 AM', '2026/09/10 08:30:00 AM'),
+    makeRow('2026/09/10 08:20:00 AM', '2026/09/10 08:50:00 AM'),
+  ].map((row) => row.join(',')).join('\n');
+  const file = new File([csv], 'zoom.csv', { type: 'text/csv' });
+  const [row] = await parseZoomAttendanceWorkbook(file, [{
+    sequence: '1',
+    name: '홍길동',
+    niceNumber: '없음',
+    schoolName: '테스트학교',
+    source: { school: '테스트학교' },
+  }], { startTime: '08:00', endTime: '09:50' });
+
+  assert.equal(row.rawMinutes, 60);
+  assert.equal(row.effectiveMinutes, 50);
+  assert.equal(row.result, '미인정');
+  assert.equal(row.warning, '중복 접속 10분 제외 · 인정시간 80분 미만 확인 필요');
 });

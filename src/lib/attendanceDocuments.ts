@@ -257,12 +257,19 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
     const entryMinutes = matches.map((match) => parseMinutes(match.entry)).filter((value) => value != null) as number[];
     const exitMinutes = matches.map((match) => parseMinutes(match.exit)).filter((value) => value != null) as number[];
     const rawMinutes = Math.round(matches.reduce((sum, match) => sum + match.minutes, 0));
-    const effectiveMinutes = matches.reduce((sum, match) => {
+    const intervals = matches.reduce<Array<[number, number]>>((result, match) => {
       const entry = parseMinutes(match.entry);
       const exit = parseMinutes(match.exit);
-      if (entry == null || exit == null || start == null || end == null) return sum;
-      return sum + calculateEffectiveZoomMinutes(entry, exit, start, end);
-    }, 0);
+      if (entry != null && exit != null) result.push([entry, exit]);
+      return result;
+    }, []);
+    const individualEffectiveMinutes = start == null || end == null
+      ? 0
+      : intervals.reduce((sum, [entry, exit]) => sum + calculateEffectiveZoomMinutes(entry, exit, start, end), 0);
+    const effectiveMinutes = start == null || end == null
+      ? 0
+      : calculateMergedEffectiveZoomMinutes(intervals, start, end);
+    const excludedOverlapMinutes = Math.max(0, individualEffectiveMinutes - effectiveMinutes);
     const result = effectiveMinutes >= 80 ? "인정" : "미인정";
     const earliestEntry = entryMinutes.length ? Math.min(...entryMinutes) : null;
     const latestExit = exitMinutes.length ? Math.max(...exitMinutes) : null;
@@ -273,9 +280,59 @@ export async function parseZoomAttendanceWorkbook(file: File, people: Attendance
       rawMinutes,
       effectiveMinutes,
       result,
-      warning: !matches.length ? "줌 접속기록 없음" : rawMinutes < 80 ? "U열 기간 합계 80분 미만 확인 필요" : undefined,
+      warning: buildZoomAttendanceWarning(matches.length, effectiveMinutes, excludedOverlapMinutes),
     };
   });
+}
+
+function buildZoomAttendanceWarning(
+  matchCount: number,
+  effectiveMinutes: number,
+  excludedOverlapMinutes: number,
+): string | undefined {
+  if (matchCount === 0) return "줌 접속기록 없음";
+  const warnings: string[] = [];
+  if (excludedOverlapMinutes > 0) warnings.push(`중복 접속 ${excludedOverlapMinutes}분 제외`);
+  if (effectiveMinutes < 80) warnings.push("인정시간 80분 미만 확인 필요");
+  return warnings.length ? warnings.join(" · ") : undefined;
+}
+
+/**
+ * Merge overlapping device sessions for one participant before calculating
+ * attendance, so the same minute is counted at most once.
+ */
+export function calculateMergedEffectiveZoomMinutes(
+  intervals: Array<[number, number]>,
+  start: number,
+  end: number,
+): number {
+  const normalizedEnd = end < start ? end + 1440 : end;
+  const clippedIntervals = intervals.reduce<Array<[number, number]>>((result, [entry, exit]) => {
+    const normalizedEntry = normalizeMinuteNearRange(entry, start, normalizedEnd);
+    let normalizedExit = normalizeMinuteNearRange(exit, start, normalizedEnd);
+    if (normalizedExit < normalizedEntry) normalizedExit += 1440;
+
+    const clippedStart = Math.max(normalizedEntry, start);
+    const clippedEnd = Math.min(normalizedExit, normalizedEnd);
+    if (clippedEnd > clippedStart) result.push([clippedStart, clippedEnd]);
+    return result;
+  }, []);
+
+  clippedIntervals.sort(([leftStart], [rightStart]) => leftStart - rightStart);
+  const mergedIntervals: Array<[number, number]> = [];
+  clippedIntervals.forEach(([entry, exit]) => {
+    const previous = mergedIntervals[mergedIntervals.length - 1];
+    if (!previous || entry > previous[1]) {
+      mergedIntervals.push([entry, exit]);
+      return;
+    }
+    previous[1] = Math.max(previous[1], exit);
+  });
+
+  return mergedIntervals.reduce(
+    (sum, [entry, exit]) => sum + calculateEffectiveZoomMinutes(entry, exit, start, end),
+    0,
+  );
 }
 
 /**
