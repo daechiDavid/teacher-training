@@ -248,9 +248,11 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       });
     }
 
-    const slot1Filled = Boolean(row.course1 && row.issuedAt1 && row.link1);
+    // 링크는 연수원 영수증 양식이 있을 때만 기록한다. 과정명과 발급일은
+    // 양식 유무와 관계없이 발급 이력으로 남기므로 두 값이 있으면 완전한 슬롯이다.
+    const slot1Filled = Boolean(row.course1 && row.issuedAt1);
     const slot1Any = Boolean(row.course1 || row.issuedAt1 || row.link1);
-    const slot2Filled = Boolean(row.course2 && row.issuedAt2 && row.link2);
+    const slot2Filled = Boolean(row.course2 && row.issuedAt2);
     const slot2Any = Boolean(row.course2 || row.issuedAt2 || row.link2);
 
     if (row.issueCount === 0 && (slot1Any || slot2Any)) {
@@ -265,7 +267,7 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       issues.push({
         severity: "error",
         row: row.rowNumber,
-        message: "영수증발급횟수 1인 행은 1차 기록만 완전해야 합니다.",
+        message: "영수증발급횟수 1인 행은 1차 과정명과 발급날짜가 있어야 합니다.",
       });
     }
 
@@ -273,7 +275,7 @@ export function validateRosterIntegrity(rows: NormalizedRoster[]): ValidationIss
       issues.push({
         severity: "error",
         row: row.rowNumber,
-        message: "영수증발급횟수 2인 행은 1차와 2차 기록이 모두 완전해야 합니다.",
+        message: "영수증발급횟수 2인 행은 1차와 2차 과정명·발급날짜가 모두 있어야 합니다.",
       });
     }
   });

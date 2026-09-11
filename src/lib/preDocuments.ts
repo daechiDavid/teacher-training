@@ -14,6 +14,7 @@ export type PreliminaryTrainingSet = {
 };
 
 export type PreliminaryDocumentForm = {
+  instituteName: string;
   trainings: PreliminaryTrainingSet[];
 };
 
@@ -34,6 +35,7 @@ export async function createPreliminaryDocuments(
   const common = {
     yyyy: firstDate.year,
     M: firstDate.month,
+    "연수원명": form.instituteName.trim(),
   };
   const trainingRows: HwpxPreliminaryTrainingRow[] = form.trainings.map((training, index) => ({
     number: String(index + 1),

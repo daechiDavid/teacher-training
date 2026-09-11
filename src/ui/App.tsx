@@ -107,6 +107,7 @@ type LoadedFileState = {
 type WorkflowStep = "upload" | "review" | "issue";
 type DocumentWorkflowStep = "source" | "doc1" | "doc2" | "doc3" | "doc5" | "doc7" | "done";
 type ActiveTask = "settings" | "preliminary" | "completion" | "receipt" | "cashReceipt" | null;
+type ReceiptTemplateMode = "unitel" | "none";
 
 type GoogleUrlForm = {
   spreadsheetUrl: string;
@@ -188,6 +189,7 @@ type IssueProgressState = {
 
 type IssueCompletionState = {
   count: number;
+  receiptMode: ReceiptTemplateMode | null;
   rosterUrl: string;
   folderLinks: Array<{ name: string; url: string }>;
 };
@@ -256,7 +258,10 @@ export function App() {
   const [preliminaryForm, setPreliminaryForm] = useState<PreliminaryDocumentForm>(() => {
     const firstId = createPreliminaryRowId();
     const secondId = createPreliminaryRowId();
-    return { trainings: [createEmptyPreliminaryTraining(firstId), createEmptyPreliminaryTraining(secondId)] };
+    return {
+      instituteName: "",
+      trainings: [createEmptyPreliminaryTraining(firstId), createEmptyPreliminaryTraining(secondId)],
+    };
   });
   const [preliminaryImages, setPreliminaryImages] = useState<PreliminaryImageForm>(() =>
     preliminaryForm.trainings.map((training) => createEmptyPreliminaryImages(training.id ?? createPreliminaryRowId())),
@@ -319,6 +324,7 @@ export function App() {
   const [samplePdfUrl, setSamplePdfUrl] = useState<string | null>(null);
   const [issueProgress, setIssueProgress] = useState<IssueProgressState | null>(null);
   const [issueCompletion, setIssueCompletion] = useState<IssueCompletionState | null>(null);
+  const [receiptTemplateMode, setReceiptTemplateMode] = useState<ReceiptTemplateMode | null>(null);
   const [completionRosterMismatchIssues, setCompletionRosterMismatchIssues] = useState<CompletionRosterMismatch[]>([]);
   const [isCompletionRosterMismatchDialogOpen, setCompletionRosterMismatchDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -362,7 +368,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (step !== "issue" || !receiptEligibleResults[0] || !completionSheetForm.trainingDate.trim()) {
+    if (step !== "issue" || receiptTemplateMode !== "unitel" || !receiptEligibleResults[0] || !completionSheetForm.trainingDate.trim()) {
       setSamplePdfUrl((current) => {
         if (current) URL.revokeObjectURL(current);
         return null;
@@ -395,7 +401,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [completionSheetForm.trainingDate, receiptEligibleResults, step]);
+  }, [completionSheetForm.trainingDate, receiptEligibleResults, receiptTemplateMode, step]);
 
   async function refreshGoogleStatus(options?: { initialize?: boolean }) {
     const status = await getGoogleConfigStatus();
@@ -455,6 +461,7 @@ export function App() {
     setActiveTask(task);
     if (task === "receipt") {
       setStep("upload");
+      setReceiptTemplateMode(null);
     }
   }
 
@@ -489,6 +496,7 @@ export function App() {
   function addPreliminaryTraining() {
     const id = createPreliminaryRowId();
     setPreliminaryForm((current) => ({
+      ...current,
       trainings: [...current.trainings, createEmptyPreliminaryTraining(id)],
     }));
     setPreliminaryImages((current) => [...current, createEmptyPreliminaryImages(id)]);
@@ -502,6 +510,7 @@ export function App() {
       if (current.trainings.length <= 1 || !current.trainings[index]) return current;
       const id = current.trainings[index].id;
       return {
+        ...current,
         trainings: current.trainings.filter((training, trainingIndex) =>
           id ? training.id !== id : trainingIndex !== index,
         ),
@@ -1105,6 +1114,7 @@ export function App() {
     setError(null);
     setNotice(null);
     setIssueCompletion(null);
+    setReceiptTemplateMode(null);
     setStep("issue");
   }
 
@@ -1113,6 +1123,7 @@ export function App() {
     setNotice(null);
     setIssueProgress(null);
     setIssueCompletion(null);
+    setReceiptTemplateMode(null);
     setStep("upload");
     setCompletionFile(null);
     setCompletionRows([]);
@@ -1140,6 +1151,10 @@ export function App() {
       setError("영수증에 표시할 연수기간 날짜를 선택하세요.");
       return;
     }
+    if (receiptEligibleResults.length && !receiptTemplateMode) {
+      setError("영수증 양식을 선택하세요.");
+      return;
+    }
 
     setError(null);
     setNotice(null);
@@ -1147,7 +1162,9 @@ export function App() {
     setIssueProgress({
       current: 0,
       total: receiptEligibleResults.length,
-      label: receiptEligibleResults.length ? "영수증 파일 저장을 준비 중입니다." : "전체명단 이수 기록을 준비 중입니다.",
+      label: receiptTemplateMode === "unitel"
+        ? "영수증 파일 저장을 준비 중입니다."
+        : "전체명단 영수증 이력 기록을 준비 중입니다.",
     });
     setBusy(true);
     try {
@@ -1181,25 +1198,30 @@ export function App() {
           setIssueProgress({
             current: index,
             total: receiptEligibleResults.length,
-            label: `${result.completion.name} 영수증 만드는 중`,
+            label: receiptTemplateMode === "unitel"
+              ? `${result.completion.name} 영수증 만드는 중`
+              : `${result.completion.name} 영수증 이력 기록 중`,
           });
-          if (!folder) {
+          if (receiptTemplateMode === "unitel" && !folder) {
             folder = await createDriveTrainingFolder(completionSheetForm.trainingDate);
             folderByTraining.set(trainingName, folder);
           }
 
-          const pdfBytes = await generateReceiptPdf({
-            completion: result.completion,
-            roster: result.roster,
-            issuedDate,
-            trainingPeriod,
-          });
-          setIssueProgress({
-            current: index,
-            total: receiptEligibleResults.length,
-            label: `${result.completion.name} 영수증 저장 중`,
-          });
-          uploaded = await uploadPdfToDrive(folder.id, result.receiptFilename, Array.from(pdfBytes));
+          if (receiptTemplateMode === "unitel") {
+            if (!folder) throw new Error("영수증 저장 폴더를 만들지 못했습니다.");
+            const pdfBytes = await generateReceiptPdf({
+              completion: result.completion,
+              roster: result.roster,
+              issuedDate,
+              trainingPeriod,
+            });
+            setIssueProgress({
+              current: index,
+              total: receiptEligibleResults.length,
+              label: `${result.completion.name} 영수증 저장 중`,
+            });
+            uploaded = await uploadPdfToDrive(folder.id, result.receiptFilename, Array.from(pdfBytes));
+          }
           const nextIssueCount = result.roster.issueCount + 1;
           setIssueProgress({
             current: index,
@@ -1216,7 +1238,7 @@ export function App() {
                 result.nextSlot === 1
                   ? `G${result.roster.rowNumber}:I${result.roster.rowNumber}`
                   : `J${result.roster.rowNumber}:L${result.roster.rowNumber}`,
-              values: [[trainingName, issuedDate, uploaded.web_view_link]],
+              values: [[trainingName, issuedDate, uploaded?.web_view_link ?? ""]],
             },
           ]);
           await writeJobLog({
@@ -1250,6 +1272,7 @@ export function App() {
       await loadRosterFromGoogle();
       setIssueCompletion({
         count: receiptEligibleResults.length,
+        receiptMode: receiptEligibleResults.length ? receiptTemplateMode : null,
         rosterUrl: buildGoogleSheetUrl(googleStatus.spreadsheet_id),
         folderLinks: Array.from(folderByTraining.values()).map((folder) => ({
           name: folder.name,
@@ -1421,25 +1444,39 @@ export function App() {
             <StepCard
               icon={<FolderUp />}
               title="영수증 저장 및 기록"
-              description={receiptEligibleResults.length ? "첫 번째 대상자의 샘플 영수증을 확인한 뒤 전체 영수증 저장과 전체명단 기록을 실행합니다." : "신규 영수증 발급 대상이 없어 PDF 생성을 생략하고 전체명단의 이수 기록만 반영합니다."}
+              description={receiptEligibleResults.length
+                ? "연수원 영수증 양식을 선택한 뒤 전체명단 기록을 실행합니다."
+                : "신규 영수증 발급 대상이 없어 PDF 생성을 생략하고 전체명단의 이수 기록만 반영합니다."}
             >
               {issueCompletion ? (
                 <IssueCompletionPanel completion={issueCompletion} onReset={resetToUpload} />
               ) : (
                 <>
                   {receiptEligibleResults.length ? (
+                    <ReceiptTemplateChoice
+                      value={receiptTemplateMode}
+                      busy={busy}
+                      onChange={setReceiptTemplateMode}
+                    />
+                  ) : null}
+                  {receiptEligibleResults.length && receiptTemplateMode === "unitel" ? (
                     <div className="notice">
                       <UploadCloud size={18} />
-                      저장된 영수증은 링크가 있는 사용자만 볼 수 있도록 공유됩니다.
+                      유니텔 영수증 PDF를 만들고 Drive에 저장한 뒤 링크까지 기록합니다.
                     </div>
-                  ) : (
+                  ) : receiptEligibleResults.length && receiptTemplateMode === "none" ? (
                     <div className="notice">
                       <CheckCircle2 size={18} />
-                      신규 영수증 발급 대상이 없어 PDF 생성과 Drive 저장을 생략합니다.
+                      PDF와 링크는 만들지 않고 발급횟수, 과정명, 발급날짜와 이수 O 표시를 기록합니다.
                     </div>
+                  ) : (
+                    !receiptEligibleResults.length ? <div className="notice">
+                      <CheckCircle2 size={18} />
+                      신규 영수증 발급 대상이 없어 PDF 생성과 Drive 저장을 생략합니다.
+                    </div> : null
                   )}
                   {issueProgress ? <IssueProgress progress={issueProgress} /> : null}
-                  {receiptEligibleResults.length ? (
+                  {receiptEligibleResults.length && receiptTemplateMode === "unitel" ? (
                     <SamplePreview samplePdfUrl={samplePdfUrl} firstName={receiptEligibleResults[0]?.completion.name} />
                   ) : null}
                   <div className="action-row">
@@ -1450,9 +1487,17 @@ export function App() {
                       className="primary-action"
                       type="button"
                       onClick={generateUploadAndRecord}
-                      disabled={busy || !completionRows.length || (receiptEligibleResults.length > 0 && !samplePdfUrl) || !completionSheetForm.trainingDate.trim()}
+                      disabled={busy
+                        || !completionRows.length
+                        || (receiptEligibleResults.length > 0 && !receiptTemplateMode)
+                        || (receiptTemplateMode === "unitel" && !samplePdfUrl)
+                        || !completionSheetForm.trainingDate.trim()}
                     >
-                      {receiptEligibleResults.length ? "샘플 이상 없음 · 전체 저장 시작" : "전체명단 이수 기록만 반영"}
+                      {receiptTemplateMode === "unitel"
+                        ? "샘플 이상 없음 · 전체 저장 시작"
+                        : receiptTemplateMode === "none"
+                          ? "링크 제외 · 전체명단 기록 시작"
+                          : "전체명단 이수 기록만 반영"}
                     </button>
                   </div>
                 </>
@@ -1867,6 +1912,16 @@ function PreliminaryDocumentStage({
         {documents.length ? (
           <section className="sub-panel">
             <h3>한글 문서</h3>
+            <div className="notice preliminary-manual-notice" role="status">
+              <AlertCircle size={18} />
+              <div>
+                <strong>사전문서 생성 후 직접 입력해주세요</strong>
+                <ul>
+                  <li>1번 제출 공문: 연수원 인가번호</li>
+                  <li>3번 확약서: 연수원 대표자명</li>
+                </ul>
+              </div>
+            </div>
             <div className="document-actions">
               <button
                 className={downloadState.status === "done" ? "download-action complete" : "download-action"}
@@ -1937,6 +1992,18 @@ function PreliminaryFormView({
 
   return (
     <div className="preliminary-training-list">
+      <section className="preliminary-institute-section">
+        <label>
+          <span>연수원명</span>
+          <input
+            value={value.instituteName}
+            onChange={(event) => onChange({ ...value, instituteName: event.target.value })}
+            disabled={busy}
+            autoComplete="organization"
+          />
+        </label>
+        <p>입력한 명칭이 사전 한글 문서의 <code>{"{{연수원명}}"}</code> 위치에 들어갑니다.</p>
+      </section>
       {value.trainings.map((training, index) => {
         const image = images[index] ?? { lectureDescription: null, instructorIntro: null };
         const rowKey = training.id ?? image.id ?? String(index);
@@ -1960,6 +2027,7 @@ function PreliminaryFormView({
                 <input
                   value={training.trainingName}
                   onChange={(event) => onChange({
+                    ...value,
                     trainings: value.trainings.map((current, currentIndex) => currentIndex === index
                       ? { ...current, trainingName: event.target.value }
                       : current),
@@ -1973,6 +2041,7 @@ function PreliminaryFormView({
                   type="date"
                   value={training.trainingDate}
                   onChange={(event) => onChange({
+                    ...value,
                     trainings: value.trainings.map((current, currentIndex) => currentIndex === index
                       ? { ...current, trainingDate: event.target.value }
                       : current),
@@ -1985,6 +2054,7 @@ function PreliminaryFormView({
                 <input
                   value={training.instructorName}
                   onChange={(event) => onChange({
+                    ...value,
                     trainings: value.trainings.map((current, currentIndex) => currentIndex === index
                       ? { ...current, instructorName: event.target.value }
                       : current),
@@ -3061,10 +3131,12 @@ function IssueCompletionPanel({
       <div className="completion-heading">
         <CheckCircle2 size={22} />
         <div>
-          <h3>저장이 완료되었습니다</h3>
+          <h3>처리가 완료되었습니다</h3>
           <p>
-            {completion.count > 0
-              ? `${completion.count.toLocaleString()}건의 영수증 저장과 전체명단 기록을 완료했습니다.`
+            {completion.count > 0 && completion.receiptMode === "unitel"
+              ? `${completion.count.toLocaleString()}건의 유니텔 영수증 저장과 전체명단 기록을 완료했습니다.`
+              : completion.count > 0 && completion.receiptMode === "none"
+                ? `${completion.count.toLocaleString()}건의 링크를 제외하고 영수증 이력과 이수 기록을 완료했습니다.`
               : "신규 영수증 저장 없이 전체명단 이수 기록을 완료했습니다."}
           </p>
         </div>
@@ -3125,8 +3197,52 @@ function ResultTable({ results }: { results: ReturnType<typeof matchRecipients> 
   );
 }
 
+function ReceiptTemplateChoice({
+  value,
+  busy,
+  onChange,
+}: {
+  value: ReceiptTemplateMode | null;
+  busy: boolean;
+  onChange: (value: ReceiptTemplateMode) => void;
+}) {
+  return (
+    <fieldset className="receipt-template-choice" disabled={busy}>
+      <legend>영수증 양식</legend>
+      <div className="receipt-template-options">
+        <label data-selected={value === "unitel"}>
+          <input
+            type="radio"
+            name="receipt-template"
+            value="unitel"
+            checked={value === "unitel"}
+            onChange={() => onChange("unitel")}
+          />
+          <span>
+            <strong>유니텔 양식</strong>
+            <small>PDF 생성 · Drive 저장 · 링크 기록</small>
+          </span>
+        </label>
+        <label data-selected={value === "none"}>
+          <input
+            type="radio"
+            name="receipt-template"
+            value="none"
+            checked={value === "none"}
+            onChange={() => onChange("none")}
+          />
+          <span>
+            <strong>양식 없음</strong>
+            <small>링크 제외 · 발급횟수/과정명/발급일/O 기록</small>
+          </span>
+        </label>
+      </div>
+    </fieldset>
+  );
+}
+
 function isPreliminaryFormReady(form: PreliminaryDocumentForm): boolean {
-  return form.trainings.length > 0 && form.trainings.every((training) => Boolean(
+  return Boolean(form.instituteName.trim()) && form.trainings.length > 0 && form.trainings.every((training) => Boolean(
     training.trainingName.trim()
       && training.trainingDate.trim()
       && training.instructorName.trim(),
@@ -3141,7 +3257,7 @@ function isPreliminaryImageFormReady(images: PreliminaryImageForm): boolean {
 
 function validatePreliminaryForm(form: PreliminaryDocumentForm) {
   if (!isPreliminaryFormReady(form)) {
-    throw new Error("각 연수의 연수명, 연수 날짜, 강사명을 모두 입력하세요.");
+    throw new Error("연수원명과 각 연수의 연수명, 연수 날짜, 강사명을 모두 입력하세요.");
   }
   form.trainings.forEach((training) => parseTrainingDate(training.trainingDate));
 }

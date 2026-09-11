@@ -662,6 +662,127 @@ tr[data-status="excluded"] {
   gap: 14px;
 }
 
+.preliminary-institute-section {
+  background: #f8fafc;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+}
+
+.preliminary-institute-section label {
+  display: grid;
+  gap: 6px;
+}
+
+.preliminary-institute-section label span,
+.receipt-template-choice legend {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.preliminary-institute-section input {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 14px;
+  min-height: 44px;
+  padding: 8px 10px;
+  width: min(100%, 520px);
+}
+
+.preliminary-institute-section p {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.preliminary-manual-notice {
+  align-items: flex-start;
+}
+
+.preliminary-manual-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.preliminary-manual-notice > div {
+  display: grid;
+  gap: 5px;
+}
+
+.preliminary-manual-notice ul {
+  display: grid;
+  gap: 3px;
+  line-height: 1.5;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.receipt-template-choice {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.receipt-template-choice legend {
+  margin-bottom: 8px;
+}
+
+.receipt-template-options {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.receipt-template-options label {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  min-height: 72px;
+  padding: 12px 14px;
+}
+
+.receipt-template-options label[data-selected="true"] {
+  background: #eff6ff;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px #2563eb;
+}
+
+.receipt-template-options input {
+  accent-color: #2563eb;
+  flex: 0 0 auto;
+  height: 18px;
+  width: 18px;
+}
+
+.receipt-template-options span {
+  display: grid;
+  gap: 3px;
+}
+
+.receipt-template-options strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.receipt-template-options small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.receipt-template-choice:disabled .receipt-template-options label {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .preliminary-training-section {
   border: 1px solid #dbe3ef;
   border-radius: 8px;
@@ -1146,6 +1267,7 @@ select {
 
   .step-progress,
   .action-row,
+  .receipt-template-options,
   .evidence-controls,
   .document-form,
   .preliminary-training-grid,
