@@ -32,10 +32,10 @@ export type CaptureEvidenceRow = {
   id: string;
   period: 1 | 2;
   mode: CaptureMode;
-  cameraImage: CaptureEvidenceImage | null;
+  cameraImages: CaptureEvidenceImage[];
   chatImages: CaptureEvidenceImage[];
-  /** Links rows automatically created from one multi-image chat selection. */
-  chatImageBatchId?: string;
+  /** Links rows automatically created from one multi-image selection. */
+  imageBatchId?: string;
 };
 
 export type AttendancePerson = {
@@ -140,9 +140,22 @@ type EmbeddedEvidenceRow = {
   period: 1 | 2;
   mode: CaptureMode;
   sequence: number;
-  cameraImage: EmbeddedImageRef | null;
+  cameraImages: EmbeddedImageRef[];
   chatImages: EmbeddedImageRef[];
 };
+
+type EvidenceCellLayout = {
+  colAddr: number;
+  colSpan: number;
+  cellWidth: number;
+  imageWidth: number;
+};
+
+const EVIDENCE_IMAGE_START_COLUMN = 4;
+const EVIDENCE_IMAGE_COLUMN_SPAN = 11;
+const EVIDENCE_IMAGE_TOTAL_WIDTH = 32113;
+const SINGLE_CAMERA_IMAGE_WIDTH = 30000;
+const IMAGE_TO_CELL_WIDTH_RATIO = 7600 / 8028;
 
 export function buildAttendancePeople(rows: NormalizedCompletion[]): AttendancePerson[] {
   return [...rows]
@@ -743,8 +756,8 @@ function renderEvidence(section: string, rows: EmbeddedEvidenceRow[], form: Atte
   const baseRow = Number(cameraRow.match(/rowAddr="(\d+)"/)?.[1] ?? "0");
 
   const dataRows: EmbeddedEvidenceRow[] = rows.length ? rows : [
-    { period: 1, mode: "camera", sequence: 1, cameraImage: null, chatImages: [] },
-    { period: 2, mode: "camera", sequence: 1, cameraImage: null, chatImages: [] },
+    { period: 1, mode: "camera", sequence: 1, cameraImages: [], chatImages: [] },
+    { period: 2, mode: "camera", sequence: 1, cameraImages: [], chatImages: [] },
   ];
   const periods = [...new Set(dataRows.map((row) => row.period))].sort((a, b) => a - b);
 
@@ -758,9 +771,10 @@ function renderEvidence(section: string, rows: EmbeddedEvidenceRow[], form: Atte
       const cells: string[] = [];
       // The 교시 label cell appears once per period and spans the whole group.
       if (index === 0) cells.push(renderEvidenceLabelCell(labelCell, periodLabel, group.length, rowHeights));
-      const contentCells = row.mode === "camera" ? cameraContentCells : chatCells;
-      const values = evidenceRowValues(row);
-      contentCells.forEach((cell) => cells.push(setCellHeight(replaceTokens(cell, values), rowHeight)));
+      const contentCells = row.mode === "camera"
+        ? renderCameraEvidenceCells(cameraContentCells, chatCells, row, rowHeight)
+        : chatCells.map((cell) => setCellHeight(replaceTokens(cell, evidenceRowValues(row)), rowHeight));
+      cells.push(...contentCells);
       const rowAddr = baseRow + physicalRows.length;
       physicalRows.push(`<hp:tr>${cells.map((cell) => setCellRowAddr(cell, rowAddr)).join("")}</hp:tr>`);
     });
@@ -781,12 +795,75 @@ function renderEvidenceLabelCell(template: string, label: string, span: number, 
 function evidenceRowValues(row: EmbeddedEvidenceRow): Record<string, string> {
   return {
     "증빙번호": `${row.period}-${row.sequence}`,
-    "캠화면이미지": row.mode === "camera" && row.cameraImage ? renderImageXml(row.cameraImage, "wide") : "",
-    "채팅화면_1": row.mode === "chat" && row.chatImages[0] ? renderImageXml(row.chatImages[0], "narrow") : "",
-    "채팅화면_2": row.mode === "chat" && row.chatImages[1] ? renderImageXml(row.chatImages[1], "narrow") : "",
-    "채팅화면_3": row.mode === "chat" && row.chatImages[2] ? renderImageXml(row.chatImages[2], "narrow") : "",
-    "채팅화면_4": row.mode === "chat" && row.chatImages[3] ? renderImageXml(row.chatImages[3], "narrow") : "",
+    "캠화면이미지": row.mode === "camera" && row.cameraImages[0] ? renderImageXml(row.cameraImages[0], SINGLE_CAMERA_IMAGE_WIDTH) : "",
+    "채팅화면_1": row.mode === "chat" && row.chatImages[0] ? renderImageXml(row.chatImages[0], 7600) : "",
+    "채팅화면_2": row.mode === "chat" && row.chatImages[1] ? renderImageXml(row.chatImages[1], 7600) : "",
+    "채팅화면_3": row.mode === "chat" && row.chatImages[2] ? renderImageXml(row.chatImages[2], 7600) : "",
+    "채팅화면_4": row.mode === "chat" && row.chatImages[3] ? renderImageXml(row.chatImages[3], 7600) : "",
   };
+}
+
+function renderCameraEvidenceCells(
+  cameraContentCells: string[],
+  chatCells: string[],
+  row: EmbeddedEvidenceRow,
+  rowHeight: number,
+): string[] {
+  if (row.cameraImages.length <= 1) {
+    return cameraContentCells.map((cell) =>
+      setCellHeight(replaceTokens(cell, evidenceRowValues(row)), rowHeight),
+    );
+  }
+
+  const numberCell = cameraContentCells[0];
+  const typeCell = cameraContentCells.at(-1);
+  const imageCellTemplates = chatCells.slice(1, -1);
+  if (!numberCell || !typeCell || imageCellTemplates.length < row.cameraImages.length) {
+    return cameraContentCells.map((cell) =>
+      setCellHeight(replaceTokens(cell, evidenceRowValues(row)), rowHeight),
+    );
+  }
+
+  const renderedNumberCell = setCellHeight(replaceTokens(numberCell, {
+    "증빙번호": `${row.period}-${row.sequence}`,
+  }), rowHeight);
+  const renderedImageCells = calculateEvidenceCellLayout(row.cameraImages.length).map((layout, index) => {
+    const rendered = replaceTokens(imageCellTemplates[index], {
+      [`채팅화면_${index + 1}`]: renderImageXml(row.cameraImages[index], layout.imageWidth),
+    });
+    return configureEvidenceImageCell(rendered, layout, rowHeight);
+  });
+  return [renderedNumberCell, ...renderedImageCells, setCellHeight(typeCell, rowHeight)];
+}
+
+export function calculateEvidenceCellLayout(imageCount: number): EvidenceCellLayout[] {
+  const count = Math.max(1, Math.min(4, Math.trunc(imageCount) || 1));
+  const baseSpan = Math.floor(EVIDENCE_IMAGE_COLUMN_SPAN / count);
+  const spanRemainder = EVIDENCE_IMAGE_COLUMN_SPAN % count;
+  const baseWidth = Math.floor(EVIDENCE_IMAGE_TOTAL_WIDTH / count);
+  const widthRemainder = EVIDENCE_IMAGE_TOTAL_WIDTH % count;
+  let colAddr = EVIDENCE_IMAGE_START_COLUMN;
+  return Array.from({ length: count }, (_, index) => {
+    const colSpan = baseSpan + (index < spanRemainder ? 1 : 0);
+    const cellWidth = baseWidth + (index < widthRemainder ? 1 : 0);
+    const layout = {
+      colAddr,
+      colSpan,
+      cellWidth,
+      imageWidth: count === 1
+        ? SINGLE_CAMERA_IMAGE_WIDTH
+        : Math.round(cellWidth * IMAGE_TO_CELL_WIDTH_RATIO),
+    };
+    colAddr += colSpan;
+    return layout;
+  });
+}
+
+function configureEvidenceImageCell(cell: string, layout: EvidenceCellLayout, height: number): string {
+  return setCellHeight(cell, height)
+    .replace(/(<hp:cellAddr colAddr=)"\d+"/, `$1"${layout.colAddr}"`)
+    .replace(/(<hp:cellSpan colSpan=)"\d+"/, `$1"${layout.colSpan}"`)
+    .replace(/(<hp:cellSz width=)"\d+"/, `$1"${layout.cellWidth}"`);
 }
 
 function readCellHeight(cell: string): number {
@@ -798,12 +875,14 @@ function setCellHeight(cell: string, height: number): string {
 }
 
 function computeEvidenceRowHeight(row: EmbeddedEvidenceRow, defaultHeight: number): number {
-  const WIDE_WIDTH = 30000;
   const NARROW_WIDTH = 7600;
   const PADDING = 800;
-  if (row.mode === "camera" && row.cameraImage && row.cameraImage.naturalWidth > 0) {
-    const imgHeight = Math.round(WIDE_WIDTH * (row.cameraImage.naturalHeight / row.cameraImage.naturalWidth));
-    return Math.max(defaultHeight, imgHeight + PADDING);
+  if (row.mode === "camera" && row.cameraImages.length > 0) {
+    const [{ imageWidth }] = calculateEvidenceCellLayout(row.cameraImages.length);
+    const imageHeights = row.cameraImages
+      .filter((image) => image.naturalWidth > 0)
+      .map((image) => Math.round(imageWidth * (image.naturalHeight / image.naturalWidth)));
+    if (imageHeights.length) return Math.max(defaultHeight, Math.max(...imageHeights) + PADDING);
   }
   if (row.mode === "chat" && row.chatImages.length > 0) {
     const maxImgHeight = Math.max(...row.chatImages
@@ -905,7 +984,7 @@ function replaceTokensAndInvalidateLineSegments(value: string, replacements: Rec
 
 async function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[]): Promise<EmbeddedEvidenceRow[]> {
   const meaningfulRows = rows.filter((row) =>
-    row.mode === "camera" ? Boolean(row.cameraImage) : row.chatImages.length > 0,
+    row.mode === "camera" ? row.cameraImages.length > 0 : row.chatImages.length > 0,
   );
   let imageIndex = 0;
   const sequenceByPeriod = new Map<1 | 2, number>();
@@ -929,18 +1008,18 @@ async function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[])
         naturalHeight,
       };
     };
-    const cameraImage = row.mode === "camera" && row.cameraImage ? await embed(row.cameraImage) : null;
+    const cameraImages = row.mode === "camera" ? await Promise.all(row.cameraImages.slice(0, 4).map(embed)) : [];
     const chatImages = row.mode === "chat" ? await Promise.all(row.chatImages.slice(0, 4).map(embed)) : [];
     embeddedRows.push({
       period: row.period,
       mode: row.mode,
       sequence: nextSequence,
-      cameraImage,
+      cameraImages,
       chatImages,
     });
   }
 
-  const refs = embeddedRows.flatMap((row) => [row.cameraImage, ...row.chatImages].filter((image): image is EmbeddedImageRef => Boolean(image)));
+  const refs = embeddedRows.flatMap((row) => [...row.cameraImages, ...row.chatImages]);
   if (!refs.length) return embeddedRows;
 
   const headerPath = "Contents/header.xml";
@@ -965,8 +1044,7 @@ async function embedEvidenceImages(files: HwpxFiles, rows: CaptureEvidenceRow[])
   return embeddedRows;
 }
 
-function renderImageXml(image: EmbeddedImageRef, size: "wide" | "narrow"): string {
-  const width = size === "wide" ? 30000 : 7600;
+function renderImageXml(image: EmbeddedImageRef, width: number): string {
   const height = image.naturalWidth > 0 && image.naturalHeight > 0
     ? Math.round(width * (image.naturalHeight / image.naturalWidth))
     : 6500;
@@ -1137,7 +1215,10 @@ function isSchoolNameMatch(zoomSchool: string, rosterSchool: string): boolean {
 
 function normalizeSchoolMatchText(value: string): string {
   return normalizeUniversityAttachedSchoolName(compactMatchText(value))
-    .replace(/병설유치원/g, "병유")
+    // Zoom names often shorten a school-affiliated kindergarten to 병설유/병유
+    // and may omit the parent elementary school's grade marker.
+    .replace(/병설유치원|병설유|병유/g, "병설유치원")
+    .replace(/컴퍼스|캠퍼스/g, "캠")
     .replace(/공업고등학교/g, "공고")
     .replace(/공업고/g, "공고")
     .replace(/외국어고등학교/g, "외고")
@@ -1147,6 +1228,7 @@ function normalizeSchoolMatchText(value: string): string {
     .replace(/고등학교/g, "고")
     .replace(/여자/g, "여")
     .replace(/남자/g, "남")
+    .replace(/(?:초|중|고)병설유치원/g, "병설유치원")
     .replace(/학교/g, "");
 }
 

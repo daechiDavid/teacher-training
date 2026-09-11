@@ -26,6 +26,8 @@ const {
   buildDefaultCaptureRows, updateCaptureResult, applyZoomChatAttendanceText,
   applyRecognizedZoomRowsToCaptureRows: applyZoom, buildSummaryRows,
   calculateEffectiveZoomMinutes, calculateMergedEffectiveZoomMinutes,
+  calculateEvidenceCellLayout,
+  createCaptureHwpx,
   parseZoomAttendanceWorkbook,
 } = await import('../src/lib/attendanceDocuments.ts');
 const people = ['김가람', '이보람', '박다솜'].map((name, index) => ({
@@ -33,6 +35,63 @@ const people = ['김가람', '이보람', '박다솜'].map((name, index) => ({
 }));
 const zoom = (results) => people.map((person, index) => ({ ...person, result: results[index] }));
 const marks = (rows) => rows.map(({ period1, period2, result }) => [period1, period2, result]);
+
+test('캠 이미지 수에 맞춰 증빙 칸을 균등 분할', () => {
+  for (const count of [1, 2, 3, 4]) {
+    const layout = calculateEvidenceCellLayout(count);
+    assert.equal(layout.length, count);
+    assert.equal(layout.reduce((sum, cell) => sum + cell.colSpan, 0), 11);
+    assert.equal(layout.reduce((sum, cell) => sum + cell.cellWidth, 0), 32113);
+    assert.ok(Math.max(...layout.map((cell) => cell.cellWidth)) - Math.min(...layout.map((cell) => cell.cellWidth)) <= 1);
+    layout.forEach((cell, index) => {
+      if (index > 0) {
+        assert.equal(cell.colAddr, layout[index - 1].colAddr + layout[index - 1].colSpan);
+      }
+    });
+  }
+});
+
+test('캠 이미지 4장이 포함된 문서1 HWPX 생성', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalImage = globalThis.Image;
+  const template = readFileSync(new URL('../public/templates/attendance_capture.hwpx', import.meta.url));
+  globalThis.fetch = async () => new Response(template);
+  globalThis.Image = class MockImage {
+    naturalWidth = 1600;
+    naturalHeight = 900;
+    onload;
+    set src(_value) {
+      queueMicrotask(() => this.onload?.());
+    }
+  };
+  try {
+    const image = (index) => ({
+      name: `camera-${index}.png`,
+      dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+    });
+    const document = await createCaptureHwpx({
+      trainingName: '테스트 연수',
+      institute: '테스트 기관',
+      trainingDate: '2026-09-11',
+      startTime: '09:00',
+      endTime: '10:50',
+      period1Label: '1교시',
+      period2Label: '2교시',
+      instructorName: '테스트 강사',
+    }, [], [{
+      id: 'camera-row',
+      period: 1,
+      mode: 'camera',
+      cameraImages: [1, 2, 3, 4].map(image),
+      chatImages: [],
+    }]);
+    assert.equal(document.type, 'application/x-hwpml-package');
+    assert.ok(document.size > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.Image = originalImage;
+  }
+});
 
 test('2번 인정만 자동 O/O, 미인정은 채팅 결과 유지', async () => {
   const chat = new File([
@@ -154,4 +213,55 @@ test('CSV 처리 경로에서 겹치는 기기 접속을 병합하고 경고 표
   assert.equal(row.effectiveMinutes, 50);
   assert.equal(row.result, '미인정');
   assert.equal(row.warning, '중복 접속 10분 제외 · 인정시간 80분 미만 확인 필요');
+});
+
+test('CSV 학교명 축약형과 병설유치원 표기를 정식 학교명으로 자동 매칭', async () => {
+  const headers = Array.from({ length: 24 }, (_, index) => `열${index + 1}`);
+  headers[16] = '이름(원래 이름)';
+  headers[18] = '참가 시간';
+  headers[19] = '나간 시간';
+  headers[20] = '기간(분)';
+  const zoomNames = [
+    '배새하_세종캠고',
+    '안현수_서울화계병유',
+    '이문숙_현민초병설유',
+  ];
+  const peopleWithOfficialSchools = [
+    ['배새하', '세종컴퍼스고등학교'],
+    ['안현수', '서울화계초등학교병설유치원'],
+    ['이문숙', '현민초등학교병설유치원'],
+  ].map(([name, school], index) => ({
+    sequence: String(index + 1),
+    name,
+    niceNumber: '없음',
+    schoolName: school,
+    source: { school },
+  }));
+  const makeRow = (zoomName) => {
+    const row = Array(24).fill('');
+    row[16] = zoomName;
+    row[18] = '2026/09/10 08:00:00 AM';
+    row[19] = '2026/09/10 09:50:00 AM';
+    row[20] = '110';
+    return row;
+  };
+  const csv = [headers, ...zoomNames.map(makeRow)].map((row) => row.join(',')).join('\n');
+  const rows = await parseZoomAttendanceWorkbook(
+    new File([csv], 'zoom.csv', { type: 'text/csv' }),
+    peopleWithOfficialSchools,
+    { startTime: '08:00', endTime: '09:50' },
+  );
+
+  assert.deepEqual(rows.map((row) => row.result), ['인정', '인정', '인정']);
+  assert.deepEqual(rows.map((row) => row.entryTime), ['08:00', '08:00', '08:00']);
+
+  const abbreviatedKindergartenCsv = [headers, makeRow('안현수_화계병설유')]
+    .map((row) => row.join(','))
+    .join('\n');
+  const [abbreviatedKindergartenRow] = await parseZoomAttendanceWorkbook(
+    new File([abbreviatedKindergartenCsv], 'zoom.csv', { type: 'text/csv' }),
+    [peopleWithOfficialSchools[1]],
+    { startTime: '08:00', endTime: '09:50' },
+  );
+  assert.equal(abbreviatedKindergartenRow.result, '인정');
 });

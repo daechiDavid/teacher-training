@@ -5,14 +5,16 @@ import Download from "lucide-react/dist/esm/icons/download.js";
 import FileSpreadsheet from "lucide-react/dist/esm/icons/file-spreadsheet.js";
 import FolderUp from "lucide-react/dist/esm/icons/folder-up.js";
 import LockKeyhole from "lucide-react/dist/esm/icons/lock-keyhole.js";
+import List from "lucide-react/dist/esm/icons/list.js";
 import Plus from "lucide-react/dist/esm/icons/plus.js";
 import ReceiptText from "lucide-react/dist/esm/icons/receipt-text.js";
 import Settings from "lucide-react/dist/esm/icons/settings.js";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 import UploadCloud from "lucide-react/dist/esm/icons/cloud-upload.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   matchRecipients,
   normalizePhone,
@@ -132,6 +134,14 @@ type DocumentSheetSource = {
   sheetName: string;
 };
 
+type CompletionRosterMismatch = {
+  rowNumber: number;
+  name: string;
+  school: string;
+  phone: string;
+  reason: string;
+};
+
 function fileExtensionFilter(filename: string): { name: string; extensions: string[] } | undefined {
   const ext = filename.split(".").pop()?.toLowerCase();
   if (ext === "hwpx") return { name: "한글 문서", extensions: ["hwpx"] };
@@ -205,7 +215,7 @@ type PreliminaryImageSet = {
 type PreliminaryImageForm = PreliminaryImageSet[];
 type PreliminaryImageKey = "lectureDescription" | "instructorIntro";
 
-const CHAT_IMAGES_PER_EVIDENCE_ROW = 4;
+const IMAGES_PER_EVIDENCE_ROW = 4;
 
 function createPreliminaryRowId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
@@ -220,13 +230,13 @@ function createEmptyPreliminaryImages(id: string): PreliminaryImageSet {
 }
 
 function createEmptyCaptureEvidenceRow(
-  defaults: Partial<Pick<CaptureEvidenceRow, "period" | "mode" | "cameraImage" | "chatImages" | "chatImageBatchId">> = {},
+  defaults: Partial<Pick<CaptureEvidenceRow, "period" | "mode" | "cameraImages" | "chatImages" | "imageBatchId">> = {},
 ): CaptureEvidenceRow {
   return {
     id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
     period: 1,
     mode: "camera",
-    cameraImage: null,
+    cameraImages: [],
     chatImages: [],
     ...defaults,
   };
@@ -234,8 +244,8 @@ function createEmptyCaptureEvidenceRow(
 
 function splitIntoEvidenceRows(images: CaptureEvidenceImage[]): CaptureEvidenceImage[][] {
   const rows: CaptureEvidenceImage[][] = [];
-  for (let index = 0; index < images.length; index += CHAT_IMAGES_PER_EVIDENCE_ROW) {
-    rows.push(images.slice(index, index + CHAT_IMAGES_PER_EVIDENCE_ROW));
+  for (let index = 0; index < images.length; index += IMAGES_PER_EVIDENCE_ROW) {
+    rows.push(images.slice(index, index + IMAGES_PER_EVIDENCE_ROW));
   }
   return rows;
 }
@@ -309,6 +319,8 @@ export function App() {
   const [samplePdfUrl, setSamplePdfUrl] = useState<string | null>(null);
   const [issueProgress, setIssueProgress] = useState<IssueProgressState | null>(null);
   const [issueCompletion, setIssueCompletion] = useState<IssueCompletionState | null>(null);
+  const [completionRosterMismatchIssues, setCompletionRosterMismatchIssues] = useState<CompletionRosterMismatch[]>([]);
+  const [isCompletionRosterMismatchDialogOpen, setCompletionRosterMismatchDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -449,6 +461,8 @@ export function App() {
   function returnToMenu() {
     setError(null);
     setNotice(null);
+    setCompletionRosterMismatchIssues([]);
+    setCompletionRosterMismatchDialogOpen(false);
     setActiveTask(null);
   }
 
@@ -549,6 +563,8 @@ export function App() {
   async function loadCompletionDocumentSource() {
     setError(null);
     setNotice(null);
+    setCompletionRosterMismatchIssues([]);
+    setCompletionRosterMismatchDialogOpen(false);
     setBusy(true);
     try {
       if (!completionSheetForm.trainingName.trim() || !completionSheetForm.trainingDate.trim()) {
@@ -571,7 +587,12 @@ export function App() {
       if (parsedRoster.missingHeaders.length) {
         throw new Error(`전체명단에서 필수 항목을 찾지 못했습니다: ${parsedRoster.missingHeaders.join(", ")}`);
       }
-      validateCompletionDocumentRosterMatches(normalized, normalizeRosterRows(parsedRoster.rows));
+      const mismatchIssues = validateCompletionDocumentRosterMatches(normalized, normalizeRosterRows(parsedRoster.rows));
+      if (mismatchIssues.length) {
+        setCompletionRosterMismatchIssues(mismatchIssues);
+        setError("전체명단 대조 결과, 일치하지 않는 명단이 있습니다.");
+        return;
+      }
       const createdSheet = await createGoogleSheetFromSourceFolder(
         spreadsheetId,
         buildResultSheetTitle(completionSheetForm.trainingDate),
@@ -831,40 +852,43 @@ export function App() {
     if (!files) return;
     const selectedFiles = Array.from(files);
     if (!selectedFiles.length) return;
-    const images: CaptureEvidenceImage[] = await Promise.all(selectedFiles.slice(0, kind === "camera" ? 1 : undefined).map(async (file) => ({
+    const images: CaptureEvidenceImage[] = await Promise.all(selectedFiles.map(async (file) => ({
       name: file.name.replace(/\.[^.]+$/, ".jpg"),
       dataUrl: await resizeImageFileForHwpx(file, kind),
     })));
-    const chatImageGroups = kind === "chat" ? splitIntoEvidenceRows(images) : [];
+    const imageGroups = splitIntoEvidenceRows(images);
     setCaptureEvidenceRows((current) => {
       const targetIndex = current.findIndex((row) => row.id === id);
       if (targetIndex < 0) return current;
 
       const target = current[targetIndex];
-      if (kind === "camera") {
-        return current.map((row) => row.id === id ? { ...row, cameraImage: images[0] ?? null } : row);
-      }
-
-      const [firstGroup = [], ...followingGroups] = chatImageGroups;
-      const batchId = target.chatImageBatchId ?? target.id;
-      const retainedRows = current.filter((row) => row.id === id || row.chatImageBatchId !== batchId);
+      const [firstGroup = [], ...followingGroups] = imageGroups;
+      const batchId = target.imageBatchId ?? target.id;
+      const retainedRows = current.filter((row) => row.id === id || row.imageBatchId !== batchId);
       const retainedTargetIndex = retainedRows.findIndex((row) => row.id === id);
-      const insertedRows = followingGroups.map((chatImages) => createEmptyCaptureEvidenceRow({
+      const insertedRows = followingGroups.map((groupImages) => createEmptyCaptureEvidenceRow({
         period: target.period,
-        mode: "chat",
-        chatImages,
-        chatImageBatchId: batchId,
+        mode: kind,
+        cameraImages: kind === "camera" ? groupImages : [],
+        chatImages: kind === "chat" ? groupImages : [],
+        imageBatchId: batchId,
       }));
       return [
         ...retainedRows.slice(0, retainedTargetIndex),
-        { ...target, cameraImage: null, chatImages: firstGroup, chatImageBatchId: batchId },
+        {
+          ...target,
+          cameraImages: kind === "camera" ? firstGroup : [],
+          chatImages: kind === "chat" ? firstGroup : [],
+          imageBatchId: batchId,
+        },
         ...insertedRows,
         ...retainedRows.slice(retainedTargetIndex + 1),
       ];
     });
     clearCurrentDocument();
-    if (kind === "chat" && chatImageGroups.length > 1) {
-      setNotice(`채팅 이미지 ${images.length}장을 ${chatImageGroups.length}개 증빙 행으로 나누어 넣었습니다. 각 행에는 최대 4장씩 들어갑니다.`);
+    if (imageGroups.length > 1) {
+      const label = kind === "camera" ? "캠" : "채팅";
+      setNotice(`${label} 이미지 ${images.length}장을 ${imageGroups.length}개 증빙 행으로 나누어 넣었습니다. 각 행에는 최대 4장씩 들어갑니다.`);
     }
   }
 
@@ -873,7 +897,7 @@ export function App() {
       if (row.id !== id) return row;
       const next = { ...row, ...patch };
       if (patch.mode && patch.mode !== row.mode) {
-        return { ...next, cameraImage: null, chatImages: [], chatImageBatchId: undefined };
+        return { ...next, cameraImages: [], chatImages: [], imageBatchId: undefined };
       }
       return next;
     }));
@@ -1247,10 +1271,17 @@ export function App() {
       <Header authenticated={isAuthenticated} onLogout={disconnectGoogle} />
 
       {error ? (
-        <section className="alert error">
-          <AlertCircle size={18} />
-          {error}
-        </section>
+        completionRosterMismatchIssues.length ? (
+          <CompletionRosterMismatchAlert
+            issues={completionRosterMismatchIssues}
+            onOpen={() => setCompletionRosterMismatchDialogOpen(true)}
+          />
+        ) : (
+          <section className="alert error">
+            <AlertCircle size={18} />
+            {error}
+          </section>
+        )
       ) : null}
       {notice ? (
         <section className="alert info">
@@ -1430,6 +1461,11 @@ export function App() {
           ) : null}
         </section>
       )}
+      <CompletionRosterMismatchDialog
+        issues={completionRosterMismatchIssues}
+        open={isCompletionRosterMismatchDialogOpen}
+        onClose={() => setCompletionRosterMismatchDialogOpen(false)}
+      />
     </main>
   );
 }
@@ -1443,7 +1479,7 @@ function attendanceRowKey(row: AttendancePerson): string {
 function validateCompletionDocumentRosterMatches(
   completions: NormalizedCompletion[],
   rosterRows: NormalizedRoster[],
-) {
+): CompletionRosterMismatch[] {
   const rosterKeys = new Map<string, number>();
   rosterRows.forEach((row) => {
     const key = exactRosterMatchKey(row.name, row.phone, row.school);
@@ -1463,13 +1499,7 @@ function validateCompletionDocumentRosterMatches(
     }];
   });
 
-  if (!issues.length) return;
-  const preview = issues
-    .slice(0, 10)
-    .map((issue) => `${issue.rowNumber}행 ${issue.name} / ${issue.school} / ${issue.phone}: ${issue.reason}`)
-    .join("\n");
-  const suffix = issues.length > 10 ? `\n외 ${issues.length - 10}건` : "";
-  throw new Error(`전체명단 대조에서 이름, 전화번호, 학교명이 정확히 일치하지 않는 행이 있습니다.\n${preview}${suffix}`);
+  return issues;
 }
 
 function exactRosterMatchKey(name: string, phone: string, school: string): string {
@@ -1478,6 +1508,133 @@ function exactRosterMatchKey(name: string, phone: string, school: string): strin
     normalizePhone(phone),
     normalizeText(school),
   ].join("::");
+}
+
+function formatCompletionRosterMismatch(issue: CompletionRosterMismatch): string {
+  return `${issue.rowNumber}행 ${issue.name} / ${issue.school} / ${issue.phone}: ${issue.reason}`;
+}
+
+function CompletionRosterMismatchAlert({
+  issues,
+  onOpen,
+}: {
+  issues: CompletionRosterMismatch[];
+  onOpen: () => void;
+}) {
+  const [representative, ...remaining] = issues;
+
+  return (
+    <section className="alert error alert-with-action" role="alert">
+      <AlertCircle size={18} />
+      <div className="alert-copy">
+        <strong>전체명단 대조 결과, 일치하지 않는 명단이 있습니다.</strong>
+        {representative ? (
+          <p>
+            대표 1인 · {formatCompletionRosterMismatch(representative)}
+            {remaining.length ? ` 외 ${remaining.length}명` : ""}
+          </p>
+        ) : null}
+      </div>
+      <button className="alert-action" type="button" onClick={onOpen}>
+        <List size={16} />
+        미일치 명단 전체 보기
+        <span>({issues.length.toLocaleString()}명)</span>
+      </button>
+    </section>
+  );
+}
+
+function CompletionRosterMismatchDialog({
+  issues,
+  open,
+  onClose,
+}: {
+  issues: CompletionRosterMismatch[];
+  open: boolean;
+  onClose: () => void;
+}) {
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const previousActiveElement = document.activeElement as HTMLElement | null;
+    const focusTimer = window.setTimeout(() => closeButtonRef.current?.focus(), 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("keydown", handleKeyDown);
+      previousActiveElement?.focus();
+    };
+  }, [onClose, open]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="mismatch-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="completion-roster-mismatch-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="mismatch-dialog-header">
+          <div>
+            <h2 id="completion-roster-mismatch-title">미일치 명단 전체 보기</h2>
+            <p>이름, 전화번호, 학교명이 전체명단과 정확히 일치하지 않는 항목입니다.</p>
+          </div>
+          <button
+            ref={closeButtonRef}
+            className="icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label="미일치 명단 닫기"
+          >
+            <X size={18} />
+          </button>
+        </header>
+        <div className="mismatch-dialog-summary">
+          총 <strong>{issues.length.toLocaleString()}명</strong> · 창 우측 아래 모서리를 끌어 크기를 조절할 수 있습니다.
+        </div>
+        <div className="mismatch-dialog-body">
+          <table>
+            <thead>
+              <tr>
+                <th>행</th>
+                <th>이름</th>
+                <th>학교명</th>
+                <th>전화번호</th>
+                <th>사유</th>
+              </tr>
+            </thead>
+            <tbody>
+              {issues.map((issue, index) => (
+                <tr key={`${issue.rowNumber}-${issue.name}-${index}`}>
+                  <td>{issue.rowNumber}</td>
+                  <td>{issue.name}</td>
+                  <td>{issue.school}</td>
+                  <td>{issue.phone}</td>
+                  <td>{issue.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <footer className="mismatch-dialog-footer">
+          <button className="secondary-action" type="button" onClick={onClose}>닫기</button>
+        </footer>
+      </section>
+    </div>
+  );
 }
 
 function Header({ authenticated, onLogout }: { authenticated: boolean; onLogout: () => void }) {
@@ -2336,11 +2493,11 @@ function CaptureControls({
                 <option value="chat">채팅화면</option>
               </select>
               <label className="file-picker">
-                {evidenceRow.mode === "camera" ? "캠 이미지 1개" : "채팅 이미지 여러 장 (4개씩 자동 행 추가)"}
+                {evidenceRow.mode === "camera" ? "캠 이미지 여러 장 (개수대로 칸 분할)" : "채팅 이미지 여러 장 (4개씩 자동 행 추가)"}
                 <input
                   type="file"
                   accept="image/*"
-                  multiple={evidenceRow.mode === "chat"}
+                  multiple
                   onChange={(event) => onEvidenceImagesChange(evidenceRow.id, evidenceRow.mode, event.target.files)}
                   disabled={busy}
                 />
@@ -2356,7 +2513,7 @@ function CaptureControls({
           + 증빙 행 추가
         </button>
       </div>
-      <div className="table-wrap compact-preview">
+      <div className="table-wrap attendance-preview">
         <table>
           <thead>
             <tr>
@@ -2386,7 +2543,7 @@ function CaptureControls({
 
 function EvidenceImagePreview({ row }: { row: CaptureEvidenceRow }) {
   const [detailed, setDetailed] = useState(false);
-  const images = row.mode === "camera" ? (row.cameraImage ? [row.cameraImage] : []) : row.chatImages;
+  const images = row.mode === "camera" ? row.cameraImages : row.chatImages;
   if (!images.length) return <p className="muted">첨부된 이미지가 없습니다.</p>;
   return (
     <div>
@@ -2462,7 +2619,7 @@ function ZoomControls({
       </label>
       <FileStatus title="줌 접속기록" state={zoomFile} />
       {rows.length ? (
-        <div className="table-wrap compact-preview">
+        <div className="table-wrap attendance-preview">
           <table>
             <thead>
               <tr>
@@ -2546,7 +2703,7 @@ function SummaryAttendancePreview({ rows }: { rows: SummaryAttendanceRow[] }) {
     <section className="sub-panel">
       <h3>3. 종합 출결자료</h3>
       <p className="muted">이수자 {counts.completionCount.toLocaleString()}명 / 미이수자 {counts.incompleteCount.toLocaleString()}명</p>
-      <div className="table-wrap compact-preview">
+      <div className="table-wrap attendance-preview">
         <table>
           <thead>
             <tr>
